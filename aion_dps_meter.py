@@ -15,7 +15,7 @@ from tkinter import filedialog
 import customtkinter as ctk
 from PIL import Image, ImageDraw, ImageTk
 
-APP_VERSION = '1.0.0'
+APP_VERSION = '1.0.1'
 GITHUB_REPO = 'MaaxxsDev/Aion-DPS-Meter'
 GITHUB_API_LATEST = f'https://api.github.com/repos/{GITHUB_REPO}/releases/latest'
 
@@ -151,12 +151,24 @@ CODE_BY_LABEL = {label: code for code, label in CLASS_ORDER}
 CODE_BY_LABEL['Unbekannt'] = 'unknown'
 
 
+def _icon_outline(img, px=3, color=(0, 0, 0, 255)):
+    """Dilates the icon's alpha silhouette into a solid black halo behind it, so the icon
+    stays readable regardless of which archetype color it ends up sitting on."""
+    from PIL import ImageFilter
+    dilated = img.split()[3]
+    for _ in range(px):
+        dilated = dilated.filter(ImageFilter.MaxFilter(3))
+    outline_layer = Image.new('RGBA', img.size, color)
+    outline_layer.putalpha(dilated)
+    return Image.alpha_composite(outline_layer, img)
+
+
 def _icon_unknown():
-    img = Image.new('RGBA', (ICON_PX, ICON_PX), (0, 0, 0, 0))
+    img = Image.new('RGBA', (96, 96), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    p = 2
-    d.ellipse([(p, p), (ICON_PX - p, ICON_PX - p)], outline=COL_INK_MUTED, width=2)
-    return img
+    p = 10
+    d.ellipse([(p, p), (96 - p, 96 - p)], outline=COL_INK_MUTED, width=8)
+    return _icon_outline(img)
 
 
 def build_class_icons():
@@ -166,10 +178,10 @@ def build_class_icons():
         path = os.path.join(ICON_DIR, f'{code}.png')
         try:
             img = Image.open(path).convert('RGBA')
-            icons[code] = img.resize((ICON_PX, ICON_PX), Image.LANCZOS)
+            icons[code] = _icon_outline(img)
         except Exception:
             icons[code] = _icon_unknown()
-    return icons
+    return {code: img.resize((ICON_PX, ICON_PX), Image.LANCZOS) for code, img in icons.items()}
 
 
 class Settings:
