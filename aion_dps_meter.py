@@ -55,17 +55,16 @@ def resource_path(relative):
     return os.path.join(base, relative)
 
 
-def user_data_dir():
+def user_data_dir(folder_name='AionDPSMeter'):
     """Writable per-user folder for settings - never the install dir, which may be read-only."""
     base = os.environ.get('APPDATA') or os.path.expanduser('~')
-    path = os.path.join(base, 'AionDPSMeter')
+    path = os.path.join(base, folder_name)
     os.makedirs(path, exist_ok=True)
     return path
 
 
-ICON_PX = 20
+ICON_PX = 32
 ICON_DIR = resource_path('icons')
-SETTINGS_FILE = os.path.join(user_data_dir(), 'settings.json')
 
 
 def _parse_version(v):
@@ -128,16 +127,21 @@ def download_update(url, filename, progress_cb=None):
 
 # Nur die auf OriginAion tatsaechlich spielbaren Klassen (kein Aethertech/Barde/Schuetze).
 CLASS_ORDER = [
-    ('templar', 'Templer'),
-    ('gladiator', 'Gladiator'),
-    ('assassin', 'Assassine'),
-    ('ranger', 'Waldläufer'),
-    ('sorcerer', 'Magier'),
-    ('spiritmaster', 'Geisterbeschwörer'),
-    ('cleric', 'Kleriker'),
-    ('chanter', 'Kantor'),
+    'templar', 'gladiator', 'assassin', 'ranger',
+    'sorcerer', 'spiritmaster', 'cleric', 'chanter',
 ]
-CLASS_LABELS = dict(CLASS_ORDER, unknown='Unbekannt')
+CLASS_LABELS_BY_LANG = {
+    'de': {
+        'templar': 'Templer', 'gladiator': 'Gladiator', 'assassin': 'Assassine',
+        'ranger': 'Waldläufer', 'sorcerer': 'Magier', 'spiritmaster': 'Geisterbeschwörer',
+        'cleric': 'Kleriker', 'chanter': 'Kantor',
+    },
+    'en': {
+        'templar': 'Templar', 'gladiator': 'Gladiator', 'assassin': 'Assassin',
+        'ranger': 'Ranger', 'sorcerer': 'Sorcerer', 'spiritmaster': 'Spiritmaster',
+        'cleric': 'Cleric', 'chanter': 'Chanter',
+    },
+}
 
 # Zeilenfarbe nach Archetyp (Aion-Farbschema): Krieger=Blau, Spaeher=Gruen, Magier=Lila, Priester=Gelb.
 CLASS_COLORS = {
@@ -147,8 +151,17 @@ CLASS_COLORS = {
     'cleric': '#c98500', 'chanter': '#c98500',
     'unknown': '#5a5a57',
 }
-CODE_BY_LABEL = {label: code for code, label in CLASS_ORDER}
-CODE_BY_LABEL['Unbekannt'] = 'unknown'
+
+
+def class_labels():
+    """code -> localized display label, plus the 'unknown' fallback, for the current language."""
+    labels = dict(CLASS_LABELS_BY_LANG.get(current_lang(), CLASS_LABELS_BY_LANG['de']))
+    labels['unknown'] = tr('unknown_class')
+    return labels
+
+
+def code_by_label():
+    return {label: code for code, label in class_labels().items()}
 
 
 def _icon_outline(img, px=3, color=(0, 0, 0, 255)):
@@ -174,7 +187,7 @@ def _icon_unknown():
 def build_class_icons():
     """code -> PIL.Image (RGBA, ICON_PX square). Falls back to a plain circle if a PNG is missing."""
     icons = {'unknown': _icon_unknown()}
-    for code, _label in CLASS_ORDER:
+    for code in CLASS_ORDER:
         path = os.path.join(ICON_DIR, f'{code}.png')
         try:
             img = Image.open(path).convert('RGBA')
@@ -185,22 +198,36 @@ def build_class_icons():
 
 
 class Settings:
-    """Persists log path, the user's own character name, and per-player class assignments."""
+    """Persists log path, the user's own character name, language, and per-player class assignments.
 
-    def __init__(self):
-        self.data = {'log_path': DEFAULT_LOG_PATH, 'character_name': '', 'classes': {}}
+    An optional profile keeps a second, fully separate settings file (own log path, character
+    name, class assignments) - for dual-boxing, where two game clients write into two separate
+    Chat.log files and each needs its own identity, launch a second instance with a profile name
+    as the second command-line argument so the two don't share (and overwrite) one settings file.
+    """
+
+    def __init__(self, profile=None):
+        folder = 'AionDPSMeter'
+        if profile:
+            safe = re.sub(r'[^A-Za-z0-9_-]', '', profile) or 'profile'
+            folder = f'AionDPSMeter_{safe}'
+        self.settings_file = os.path.join(user_data_dir(folder), 'settings.json')
+        self.data = {'log_path': DEFAULT_LOG_PATH, 'character_name': '', 'language': 'de',
+                     'dual_account_mode': False, 'classes': {}}
         try:
-            with open(SETTINGS_FILE, 'r', encoding='utf-8') as f:
+            with open(self.settings_file, 'r', encoding='utf-8') as f:
                 loaded = json.load(f)
             self.data.update({k: v for k, v in loaded.items() if k in self.data})
             if 'classes' in loaded and isinstance(loaded['classes'], dict):
                 self.data['classes'] = loaded['classes']
         except Exception:
             pass
+        if self.data.get('language') not in ('de', 'en'):
+            self.data['language'] = 'de'
 
     def _save(self):
         try:
-            with open(SETTINGS_FILE, 'w', encoding='utf-8') as f:
+            with open(self.settings_file, 'w', encoding='utf-8') as f:
                 json.dump(self.data, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
@@ -213,6 +240,14 @@ class Settings:
     def character_name(self):
         return self.data.get('character_name', '')
 
+    @property
+    def language(self):
+        return self.data.get('language', 'de')
+
+    @property
+    def dual_account_mode(self):
+        return bool(self.data.get('dual_account_mode', False))
+
     def set_log_path(self, path):
         self.data['log_path'] = path or DEFAULT_LOG_PATH
         self._save()
@@ -221,12 +256,163 @@ class Settings:
         self.data['character_name'] = name
         self._save()
 
+    def set_language(self, lang):
+        self.data['language'] = lang if lang in ('de', 'en') else 'de'
+        self._save()
+
+    def set_dual_account_mode(self, enabled):
+        self.data['dual_account_mode'] = bool(enabled)
+        self._save()
+
     def get_class(self, name):
         return self.data['classes'].get(name, 'unknown')
 
     def set_class(self, name, code):
         self.data['classes'][name] = code
         self._save()
+
+
+# Resolves UI text and parsing/detection language at runtime. Set once in main() to the live
+# Settings instance - tr() always reads settings.language fresh, so backend logic (parsing,
+# status text, dropdown labels rebuilt every refresh cycle) reacts immediately to a language
+# change, while widget text already drawn on screen needs an app restart to relabel itself.
+_SETTINGS = None
+
+
+def current_lang():
+    return _SETTINGS.language if _SETTINGS is not None else 'de'
+
+
+STRINGS = {
+    'de': {
+        'options': 'Optionen', 'settings_title': 'Optionen',
+        'log_path_label': 'Spielpfad (Chat.log):',
+        'char_name_label': 'Dein Charaktername:',
+        'language_label': 'Sprache / Spielsprache:',
+        'language_hint': 'Steuert sowohl die Programmsprache als auch die Erkennung im Chat.log '
+                          '(muss zur Spielsprache passen). Ein Neustart ist nötig, damit die '
+                          'Programmsprache überall greift.',
+        'dual_account_label': 'Dual-Account-Modus (Beta)',
+        'dual_account_hint': 'Trennt "Du" anhand des benutzten Skills in mehrere eigene Zeilen '
+                              '(z.B. "Du (Templer)" / "Du (Kantor)") - für zwei gleichzeitig '
+                              'gespielte Accounts über dieselbe Chat.log. Nicht 100% zuverlässig: '
+                              'Skills ohne erkannte Klasse (z.B. reiner Angriff) werden dem zuletzt '
+                              'erkannten Account zugerechnet. Nur aktivieren, wenn du wirklich '
+                              'zwei Accounts gleichzeitig spielst - sonst wird dein eigener Schaden '
+                              'unnötig aufgesplittet.',
+        'assign_classes_label': 'Klassen zuweisen:',
+        'assign_classes_hint': 'Automatisch erkannte Vorschläge sind bereits ausgewählt - nur bei '
+                                'Bedarf ändern. Manuelle Auswahl hat immer Vorrang.',
+        'no_players_yet': 'Noch keine Spieler erkannt - starte einen Kampf.',
+        'save_close': 'Speichern & Schließen',
+        'cancel': 'Abbrechen',
+        'check_updates': 'Nach Updates suchen (v{version})',
+        'choose_log_title': 'Chat.log auswählen',
+        'log_file_filter': 'Log-Datei',
+        'all_files_filter': 'Alle Dateien',
+        'you_suffix': ' (Du)',
+        'unknown_class': 'Unbekannt',
+        'update_available_title': 'Update verfügbar',
+        'update_available_new': 'Neue Version verfügbar: {version}',
+        'update_installed': 'Installiert: v{version}',
+        'no_changelog': '(kein Änderungsprotokoll)',
+        'update_now': 'Jetzt aktualisieren',
+        'later': 'Später',
+        'downloading': 'Lädt herunter...',
+        'downloaded_pct': '{pct}% heruntergeladen',
+        'download_error': 'Fehler beim Herunterladen: {error}',
+        'retry': 'Erneut versuchen',
+        'download_done': 'Download fertig - Installation läuft. Bitte danach das Programm neu öffnen.',
+        'app_title': 'Aion 4.6 DPS-Meter',
+        'app_header': 'AION DPS METER',
+        'reset': 'Reset',
+        'copy': 'Kopieren',
+        'stat_duration': 'Dauer', 'stat_damage': 'Gesamtschaden',
+        'stat_dps': 'Raid-DPS', 'stat_heal': 'Gesamtheilung',
+        'tab_damage': 'Schaden', 'tab_heal': 'Heilung',
+        'no_update_current': 'Kein Update verfügbar - du bist aktuell.',
+        'live_label': 'Live (aktueller Kampf)', 'total_session': 'Gesamt-Sitzung',
+        'total_all_monsters': 'Gesamt (alle Monster)',
+        'copy_total_fallback': 'Gesamt',
+        'target_label': 'Ziel:',
+        'lines_processed': 'Zeilen verarbeitet: {n}',
+        'copy_row': 'Zeile kopieren',
+        'no_data_view': 'Keine Daten in dieser Ansicht',
+        'crit_short': 'Krit',
+        'unit_damage': 'Schaden', 'unit_heal': 'Heilung',
+        'waiting_for_log': 'Warte auf Log-Datei...',
+        'connected': 'Verbunden: {path}',
+        'log_not_found': 'Log nicht gefunden: {path}',
+        'error_generic': 'Fehler: {error}',
+    },
+    'en': {
+        'options': 'Settings', 'settings_title': 'Settings',
+        'log_path_label': 'Game path (Chat.log):',
+        'char_name_label': 'Your character name:',
+        'language_label': 'Language / Game language:',
+        'language_hint': 'Controls both the program language and the Chat.log detection (must '
+                          'match your game’s language). Restart the app for the program '
+                          'language to apply everywhere.',
+        'dual_account_label': 'Dual-account mode (Beta)',
+        'dual_account_hint': 'Splits "Du" into several rows based on the skill used '
+                              '(e.g. "Du (Templar)" / "Du (Chanter)") - for two accounts played '
+                              'at once through the same Chat.log. Not 100% reliable: skills with '
+                              'no detected class (e.g. a plain attack) get attributed to whichever '
+                              'account was detected most recently. Only enable this if you\'re '
+                              'really playing two accounts at once - otherwise it will needlessly '
+                              'split up your own damage.',
+        'assign_classes_label': 'Assign classes:',
+        'assign_classes_hint': 'Automatically detected suggestions are already selected - only '
+                                'change if needed. A manual choice always takes priority.',
+        'no_players_yet': 'No players detected yet - start a fight.',
+        'save_close': 'Save & Close',
+        'cancel': 'Cancel',
+        'check_updates': 'Check for updates (v{version})',
+        'choose_log_title': 'Select Chat.log',
+        'log_file_filter': 'Log file',
+        'all_files_filter': 'All files',
+        'you_suffix': ' (You)',
+        'unknown_class': 'Unknown',
+        'update_available_title': 'Update available',
+        'update_available_new': 'New version available: {version}',
+        'update_installed': 'Installed: v{version}',
+        'no_changelog': '(no changelog)',
+        'update_now': 'Update now',
+        'later': 'Later',
+        'downloading': 'Downloading...',
+        'downloaded_pct': '{pct}% downloaded',
+        'download_error': 'Download error: {error}',
+        'retry': 'Retry',
+        'download_done': 'Download complete - installation running. Please reopen the program afterwards.',
+        'app_title': 'Aion 4.6 DPS Meter',
+        'app_header': 'AION DPS METER',
+        'reset': 'Reset',
+        'copy': 'Copy',
+        'stat_duration': 'Duration', 'stat_damage': 'Total Damage',
+        'stat_dps': 'Raid DPS', 'stat_heal': 'Total Healing',
+        'tab_damage': 'Damage', 'tab_heal': 'Healing',
+        'no_update_current': 'No update available - you are up to date.',
+        'live_label': 'Live (current fight)', 'total_session': 'Total session',
+        'total_all_monsters': 'Total (all monsters)',
+        'copy_total_fallback': 'Total',
+        'target_label': 'Target:',
+        'lines_processed': 'Lines processed: {n}',
+        'copy_row': 'Copy row',
+        'no_data_view': 'No data in this view',
+        'crit_short': 'Crit',
+        'unit_damage': 'Damage', 'unit_heal': 'Healing',
+        'waiting_for_log': 'Waiting for log file...',
+        'connected': 'Connected: {path}',
+        'log_not_found': 'Log not found: {path}',
+        'error_generic': 'Error: {error}',
+    },
+}
+
+
+def tr(key, **kwargs):
+    lang = current_lang()
+    text = STRINGS.get(lang, STRINGS['de']).get(key) or STRINGS['de'].get(key, key)
+    return text.format(**kwargs) if kwargs else text
 
 
 # Datenquelle: aus dem AionGermany/aion-germany Emulator-Projekt (GitHub) extrahiert -
@@ -238,7 +424,7 @@ class Settings:
 # "Urteilsschlinge"), wurden automatisch aussortiert, um Fehlzuordnungen wie bei den fruehen
 # Handeintraegen zu vermeiden. Ergaenzt um Skills, die im echten Chat.log dieses Servers
 # bestaetigt beobachtet wurden.
-CLASS_SKILL_HINTS = [
+CLASS_SKILL_HINTS_DE = [
     # Waldlaeufer (52)
     ('atem der natur', 'ranger', 3), ('auge des angriffs', 'ranger', 3), ('betäubender schuss', 'ranger', 3),
     ('blitzpfeil', 'ranger', 3), ('bogen des segens', 'ranger', 3), ('bogenreichweite erhöhen', 'ranger', 3),
@@ -433,6 +619,203 @@ CLASS_SKILL_HINTS = [
     ('zorntausch', 'spiritmaster', 3), ('zyklon des zorns', 'spiritmaster', 3),
 ]
 
+# Datenquelle: derselbe skill_tree.xml/skill_templates.xml-Join wie oben, diesmal gegen die
+# englischen Skillnamen aus dem BASIS-Retail-Client (L10N\eng\data\data.pak - dieser Server
+# pflegt fuer Englisch keine eigene client_strings_skill.xml, nur ~40 STR_SKILL_-Eintraege in
+# seiner 2_eng-Override-Datei, also kommt die volle Liste aus dem unveraenderten Basis-Paket).
+# Gleiche automatisierte Filterung: Rang-Konsistenz ueber alle roemischen Ziffern-Suffixe hinweg
+# und Cross-Klassen-Teilstring-Kollisionspruefung.
+CLASS_SKILL_HINTS_EN = [
+    # Ranger (52)
+    ('aero snare', 'ranger', 3), ('aether arrow', 'ranger', 3), ('agonizing arrow', 'ranger', 3),
+    ('arrow deluge', 'ranger', 3), ('dizzying arrow', 'ranger', 3),
+    ('arrow of virago', 'ranger', 3), ('arrow strike', 'ranger', 3), ('bestial fury', 'ranger', 3),
+    ('blazing trap', 'ranger', 3), ('boost accuracy', 'ranger', 3), ('boost bow range', 'ranger', 3),
+    ('boost parry', 'ranger', 3), ('bow of blessing', 'ranger', 3), ('breath of nature', 'ranger', 3),
+    ('deadshot', 'ranger', 3), ('dilation arrow', 'ranger', 3), ('dodging', 'ranger', 3),
+    ('entangling shot', 'ranger', 3), ('explosive arrow', 'ranger', 3), ('feint', 'ranger', 3),
+    ('finishing arrow', 'ranger', 3), ('focused shots', 'ranger', 3), ('gale arrow', 'ranger', 3),
+    ('heart shot', 'ranger', 3), ('holy arrow', 'ranger', 3), ("hunter's might", 'ranger', 3),
+    ('lethal arrow', 'ranger', 3), ('lightning arrow', 'ranger', 3), ('mau form', 'ranger', 3),
+    ("nature's resolve", 'ranger', 3), ('nimble fingers', 'ranger', 3), ('retreating slash', 'ranger', 3),
+    ('rupture arrow', 'ranger', 3), ('sandstorm trap', 'ranger', 3), ('seizure arrow', 'ranger', 3),
+    ('shackle arrow', 'ranger', 3), ('sharpen arrows', 'ranger', 3), ('shock trap', 'ranger', 3),
+    ('silence arrow', 'ranger', 3), ('skybound trap', 'ranger', 3), ('sleep arrow', 'ranger', 3),
+    ('sleep trap', 'ranger', 3), ('speed of the wind', 'ranger', 3), ('spiral arrow', 'ranger', 3),
+    ('strong shots', 'ranger', 3), ('stunning shot', 'ranger', 3), ('swift shot', 'ranger', 3),
+    ('trap of clairvoyance', 'ranger', 3), ('trap of slowing', 'ranger', 3),
+    ('unerring arrow', 'ranger', 3), ('winged avenger', 'ranger', 3), ('winged range', 'ranger', 3),
+
+    # Cleric (53)
+    ('acquittal', 'cleric', 3), ('amplification', 'cleric', 3), ('benevolence', 'cleric', 3),
+    ('light of rejuvenation', 'cleric', 3), ('roiling hack', 'cleric', 3), ("yustiel's light", 'cleric', 3),
+    ('blessed shield', 'cleric', 3), ('blinding light', 'cleric', 3), ('boost healing', 'cleric', 3),
+    ('call lightning', 'cleric', 3), ('chain of suffering', 'cleric', 3), ('chastise', 'cleric', 3),
+    ('cleanse', 'cleric', 3), ('divine spark', 'cleric', 3), ('divine touch', 'cleric', 3),
+    ("earth's wrath", 'cleric', 3), ('enfeebling burst', 'cleric', 3), ('festering wound', 'cleric', 3),
+    ('flash of recovery', 'cleric', 3), ('hallowed strike', 'cleric', 3),
+    ('hand of reincarnation', 'cleric', 3), ('healing majesty', 'cleric', 3),
+    ('immortal shroud', 'cleric', 3), ('impervious veil', 'cleric', 3), ("land's bargain", 'cleric', 3),
+    ('light of recovery', 'cleric', 3), ('light of resurrection', 'cleric', 3),
+    ('noble grace', 'cleric', 3), ("pandaemonium's protection", 'cleric', 3),
+    ('power sprint', 'cleric', 3), ('prayer of focus', 'cleric', 3), ('punishing earth', 'cleric', 3),
+    ('radiant cure', 'cleric', 3), ('reduce enmity increase rate', 'cleric', 3),
+    ('resurrection loci', 'cleric', 3), ('retribution lightning', 'cleric', 3),
+    ('reverse condition', 'cleric', 3), ('ripple of purification', 'cleric', 3),
+    ('sacrificial power', 'cleric', 3), ("sage's wisdom", 'cleric', 3), ('saving grace', 'cleric', 3),
+    ('slashing wind', 'cleric', 3), ('splendor of purification', 'cleric', 3),
+    ('splendor of rebirth', 'cleric', 3), ('splendor of recovery', 'cleric', 3),
+    ('storm of aion', 'cleric', 3), ('summon healing servant', 'cleric', 3),
+    ('summon holy servant', 'cleric', 3), ('summon noble energy', 'cleric', 3),
+    ('sympathetic heal', 'cleric', 3), ('winged blessing', 'cleric', 3), ('winged recovery', 'cleric', 3),
+    ('word of destruction', 'cleric', 3),
+
+    # Chanter (49)
+    ('acceleration cheer', 'chanter', 3), ('annihilation', 'chanter', 3), ('backshock', 'chanter', 3),
+    ('stamina absorption', 'chanter', 3),
+    ('blessing of rock', 'chanter', 3), ('blessing of stone', 'chanter', 3),
+    ('blessing of wind', 'chanter', 3), ('booming strike', 'chanter', 3),
+    ('boost mantra range', 'chanter', 3), ('boost physical attack', 'chanter', 3),
+    ('celerity mantra', 'chanter', 3), ('crashing strike', 'chanter', 3),
+    ('disorienting blow', 'chanter', 3), ('elemental screen', 'chanter', 3),
+    ('emergency teleport', 'chanter', 3), ('healing burst', 'chanter', 3),
+    ('healing conduit', 'chanter', 3), ('heaving strike', 'chanter', 3),
+    ('incandescent blow', 'chanter', 3), ('inescapable judgment', 'chanter', 3),
+    ('invincibility mantra', 'chanter', 3), ('leaping flash', 'chanter', 3),
+    ("marchutan's protection", 'chanter', 3), ('melee smash', 'chanter', 3),
+    ('meteor strike', 'chanter', 3), ('mountain crash', 'chanter', 3), ('numbing blow', 'chanter', 3),
+    ('parrying strike', 'chanter', 3), ('pentacle shock', 'chanter', 3), ('perfect parry', 'chanter', 3),
+    ('promise of earth', 'chanter', 3), ('protective ward', 'chanter', 3),
+    ('recovery spell', 'chanter', 3), ('resonance haze', 'chanter', 3), ('seismic crash', 'chanter', 3),
+    ('shield mantra', 'chanter', 3), ('soul lock', 'chanter', 3), ('splash swing', 'chanter', 3),
+    ('stamina discharge', 'chanter', 3), ('stamina restoration', 'chanter', 3),
+    ('thunderbolt strike', 'chanter', 3), ('unstoppable', 'chanter', 3), ('winged catalyst', 'chanter', 3),
+    ('winged mantra', 'chanter', 3), ('word of inspiration', 'chanter', 3), ('word of life', 'chanter', 3),
+    ('word of protection', 'chanter', 3), ('word of quickness', 'chanter', 3),
+    ('word of wind', 'chanter', 3),
+
+    # Gladiator (50)
+    ('absorbing fury', 'gladiator', 3), ('advanced polearm training', 'gladiator', 3),
+    ('aerial lockdown', 'gladiator', 3), ('ankle snare', 'gladiator', 3), ('shining slash', 'gladiator', 3),
+    ('armor of attrition', 'gladiator', 3), ('berserking', 'gladiator', 3), ('body combo', 'gladiator', 3),
+    ('body slice', 'gladiator', 3), ('boost knockdown', 'gladiator', 3), ('cleave', 'gladiator', 3),
+    ('counter leech', 'gladiator', 3), ('crippling cut', 'gladiator', 3),
+    ('crushing blow', 'gladiator', 3), ('dauntless spirit', 'gladiator', 3),
+    ('defense preparation', 'gladiator', 3), ('determination', 'gladiator', 3),
+    ('draining blow', 'gladiator', 3), ('draining sword', 'gladiator', 3),
+    ('earthquake wave', 'gladiator', 3), ('energy impact', 'gladiator', 3),
+    ('exhausting wave', 'gladiator', 3), ('explosion of rage', 'gladiator', 3),
+    ('ferocious chop', 'gladiator', 3), ('final strike', 'gladiator', 3), ('great cleave', 'gladiator', 3),
+    ('lockdown', 'gladiator', 3), ('magical defense', 'gladiator', 3),
+    ('piercing rupture', 'gladiator', 3), ('pressure wave', 'gladiator', 3),
+    ('revival wave', 'gladiator', 3), ('righteous cleave', 'gladiator', 3),
+    ('second wind', 'gladiator', 3), ('seismic billow', 'gladiator', 3),
+    ('severe precision cut', 'gladiator', 3), ('severe weakening blow', 'gladiator', 3),
+    ('sharp strike', 'gladiator', 3), ('slaughter', 'gladiator', 3), ('spite strike', 'gladiator', 3),
+    ('springing slice', 'gladiator', 3), ('strengthen wings', 'gladiator', 3),
+    ('sure strike', 'gladiator', 3), ('tendon slice', 'gladiator', 3), ('wall of steel', 'gladiator', 3),
+    ('whirling strike', 'gladiator', 3), ('winged rage', 'gladiator', 3),
+    ('winged strength', 'gladiator', 3), ('wrathful explosion', 'gladiator', 3),
+    ('wrathful strike', 'gladiator', 3), ('wrathful wave', 'gladiator', 3),
+
+    # Assassin (54)
+    ('aethertwisting', 'assassin', 3), ('agony rune', 'assassin', 3), ('ambush', 'assassin', 3),
+    ('apply deadly poison', 'assassin', 3), ('apply lethal venom', 'assassin', 3),
+    ('assassination', 'assassin', 3), ('beast kick', 'assassin', 3), ('beast leap', 'assassin', 3),
+    ('beast swipe', 'assassin', 3), ('binding rune', 'assassin', 3), ('blinding burst', 'assassin', 3),
+    ('boost crit strike chance', 'assassin', 3), ('boost magical resistance', 'assassin', 3),
+    ('break away', 'assassin', 3), ('cross slash', 'assassin', 3), ('dash and slash', 'assassin', 3),
+    ('dash attack', 'assassin', 3), ('deadly abandon', 'assassin', 3), ('deadly focus', 'assassin', 3),
+    ('encircling strike', 'assassin', 3), ('evasion rate increase', 'assassin', 3),
+    ('eye of wrath', 'assassin', 3), ('fang strike', 'assassin', 3), ('flash of speed', 'assassin', 3),
+    ('flurry', 'assassin', 3), ('killing spree', 'assassin', 3), ('lightning slash', 'assassin', 3),
+    ('massacre', 'assassin', 3), ('oath of accuracy', 'assassin', 3), ('pain rune', 'assassin', 3),
+    ('quickening doom', 'assassin', 3), ('ripclaw strike', 'assassin', 3), ('rune carve', 'assassin', 3),
+    ('rune knife', 'assassin', 3), ('rune slash', 'assassin', 3), ('searching strike', 'assassin', 3),
+    ('sensory boost', 'assassin', 3), ('shadow illusion', 'assassin', 3), ('shadow walk', 'assassin', 3),
+    ('shadowfall', 'assassin', 3), ('side strike', 'assassin', 3), ('sigil strike', 'assassin', 3),
+    ('signet silence', 'assassin', 3), ('slayer form', 'assassin', 3), ('soul slash', 'assassin', 3),
+    ('spiral slash', 'assassin', 3), ('sprinting', 'assassin', 3), ('surprise attack', 'assassin', 3),
+    ('swift edge', 'assassin', 3), ('venomous strike', 'assassin', 3), ('whirlwind slash', 'assassin', 3),
+    ('wind walk', 'assassin', 3), ('winged death', 'assassin', 3), ('winged fury', 'assassin', 3),
+
+    # Templar (47)
+    ('aether armor', 'templar', 3), ('aggravation', 'templar', 3), ('avenging blow', 'templar', 3),
+    ('barricade of steel', 'templar', 3), ('blood pact', 'templar', 3), ('boost block', 'templar', 3),
+    ('boost hp', 'templar', 3), ('break power', 'templar', 3), ('courageous shield', 'templar', 3),
+    ('dazing severe blow', 'templar', 3), ('divine blow', 'templar', 3), ('divine fury', 'templar', 3),
+    ('divine grasp', 'templar', 3), ('divine justice', 'templar', 3), ('doom lure', 'templar', 3),
+    ('empyrean armor', 'templar', 3), ('empyrean fury', 'templar', 3),
+    ('empyrean providence', 'templar', 3), ('ensnaring blow', 'templar', 3), ('face smash', 'templar', 3),
+    ('holy shield', 'templar', 3), ('illusion chains', 'templar', 3), ('incite rage', 'templar', 3),
+    ("inquisitor's blow", 'templar', 3), ('iron skin', 'templar', 3), ('magic smash', 'templar', 3),
+    ("nezekan's shield", 'templar', 3), ('panoply of protection', 'templar', 3),
+    ('pitiless blow', 'templar', 3), ('prayer of freedom', 'templar', 3),
+    ('prayer of resilience', 'templar', 3), ('prayer of victory', 'templar', 3),
+    ('provoking roar', 'templar', 3), ('punishing thrust', 'templar', 3), ('punishing wave', 'templar', 3),
+    ('punishment', 'templar', 3), ('seal of protection', 'templar', 3), ('shield bash', 'templar', 3),
+    ('shield counter', 'templar', 3), ('shield of faith', 'templar', 3), ('shield shock', 'templar', 3),
+    ('shieldburst', 'templar', 3), ('swinging shield counter', 'templar', 3),
+    ('sword storm', 'templar', 3), ('winged defense', 'templar', 3), ('winged guardian', 'templar', 3),
+    ('wrath strike', 'templar', 3),
+
+    # Sorcerer (50)
+    ('absolute zero', 'sorcerer', 3), ('aether flame', 'sorcerer', 3), ("aether's hold", 'sorcerer', 3),
+    ('arcane thunderbolt', 'sorcerer', 3), ('balaur seeker', 'sorcerer', 3),
+    ('big magma eruption', 'sorcerer', 3), ('blind leap', 'sorcerer', 3),
+    ('boon of iron-clad', 'sorcerer', 3), ('boon of quickness', 'sorcerer', 3),
+    ('boost magical attack', 'sorcerer', 3), ('boost maximum mp', 'sorcerer', 3),
+    ('conflagration', 'sorcerer', 3), ('curse of old roots', 'sorcerer', 3),
+    ('curse of roots', 'sorcerer', 3), ('curse of weakness', 'sorcerer', 3),
+    ('elemental ward', 'sorcerer', 3), ('exchange vitality', 'sorcerer', 3), ('flame cage', 'sorcerer', 3),
+    ('flame fusion', 'sorcerer', 3), ('flame harpoon', 'sorcerer', 3), ('flame spray', 'sorcerer', 3),
+    ('flaming meteor', 'sorcerer', 3), ('freezing wind', 'sorcerer', 3), ('frost', 'sorcerer', 3),
+    ('frozen shock', 'sorcerer', 3), ('glacial shard', 'sorcerer', 3), ('graspbreaker', 'sorcerer', 3),
+    ('ice harpoon', 'sorcerer', 3), ('ice sheet', 'sorcerer', 3), ('illusion gate', 'sorcerer', 3),
+    ('illusion storm', 'sorcerer', 3), ("lumiel's wrath", 'sorcerer', 3), ('magic assist', 'sorcerer', 3),
+    ('refracting shard', 'sorcerer', 3), ('robe of flame', 'sorcerer', 3),
+    ('sleep: scarecrow', 'sorcerer', 3), ('sleeping storm', 'sorcerer', 3),
+    ('soul absorption', 'sorcerer', 3), ('soul freeze', 'sorcerer', 3), ('storm strike', 'sorcerer', 3),
+    ('summon rock', 'sorcerer', 3), ('summon whirlwind', 'sorcerer', 3),
+    ('tranquilizing cloud', 'sorcerer', 3), ("vaizel's wisdom", 'sorcerer', 3),
+    ('wind cut down', 'sorcerer', 3), ('wind spear', 'sorcerer', 3), ('winged magic', 'sorcerer', 3),
+    ('winged sage', 'sorcerer', 3), ('winter binding', 'sorcerer', 3), ('wintry armor', 'sorcerer', 3),
+
+    # Spiritmaster (60)
+    ('aegis breaker', 'spiritmaster', 3), ('armor spirit', 'spiritmaster', 3),
+    ('backdraft', 'spiritmaster', 3), ('chain of earth', 'spiritmaster', 3),
+    ('cloaking word', 'spiritmaster', 3), ('command: bodyguard', 'spiritmaster', 3),
+    ('command: kamikaze', 'spiritmaster', 3), ('concentration', 'spiritmaster', 3),
+    ('contract of resistance', 'spiritmaster', 3), ('curse of fire', 'spiritmaster', 3),
+    ('curse of water', 'spiritmaster', 3), ('cursecloud', 'spiritmaster', 3),
+    ('cyclone of wrath', 'spiritmaster', 3), ('disenchant', 'spiritmaster', 3),
+    ('dispel magic', 'spiritmaster', 3), ('earthen call', 'spiritmaster', 3),
+    ('elemental spirit armor', 'spiritmaster', 3), ('enhance weakening magic', 'spiritmaster', 3),
+    ('enmity swap', 'spiritmaster', 3), ('fear: ginseng', 'spiritmaster', 3),
+    ('flames of anguish', 'spiritmaster', 3), ('healing spirit', 'spiritmaster', 3),
+    ('ignite aether', 'spiritmaster', 3), ('infernal blight', 'spiritmaster', 3),
+    ('infernal pain', 'spiritmaster', 3), ('magic implosion', 'spiritmaster', 3),
+    ("magic's freedom", 'spiritmaster', 3), ('nightmare', 'spiritmaster', 3),
+    ('replenish element', 'spiritmaster', 3), ('ritual push', 'spiritmaster', 3),
+    ('root of enervation', 'spiritmaster', 3), ('sandblaster', 'spiritmaster', 3),
+    ('shackle of vulnerability', 'spiritmaster', 3), ('sigil of silence', 'spiritmaster', 3),
+    ('soul torrent', 'spiritmaster', 3), ('spirit burn-to-ashes', 'spiritmaster', 3),
+    ('spirit detonation claw', 'spiritmaster', 3), ('spirit disturbance', 'spiritmaster', 3),
+    ('spirit pique', 'spiritmaster', 3), ('spirit preserve', 'spiritmaster', 3),
+    ('spirit ruinous offensive', 'spiritmaster', 3), ('spirit wall of protection', 'spiritmaster', 3),
+    ('stone scour', 'spiritmaster', 3), ('stone shock', 'spiritmaster', 3),
+    ('summon cyclone servant', 'spiritmaster', 3), ('summon earth spirit', 'spiritmaster', 3),
+    ('summon fire spirit', 'spiritmaster', 3), ('summon group member', 'spiritmaster', 3),
+    ('summon magma spirit', 'spiritmaster', 3), ('summon tempest spirit', 'spiritmaster', 3),
+    ('summon water spirit', 'spiritmaster', 3), ('summon wind servant', 'spiritmaster', 3),
+    ('summon wind spirit', 'spiritmaster', 3), ('summoning alacrity', 'spiritmaster', 3),
+    ('sympathetic mind', 'spiritmaster', 3), ('vacuum choke', 'spiritmaster', 3),
+    ('weaken spirit', 'spiritmaster', 3), ('winged devotion', 'spiritmaster', 3),
+    ('winged spirit', 'spiritmaster', 3), ('withering gloom', 'spiritmaster', 3),
+]
+
+CLASS_SKILL_HINTS_BY_LANG = {'de': CLASS_SKILL_HINTS_DE, 'en': CLASS_SKILL_HINTS_EN}
+
 
 class ClassGuesser:
     """Weighted keyword votes across every skill name a player has used this session."""
@@ -444,7 +827,8 @@ class ClassGuesser:
         if not skill:
             return
         low = skill.lower()
-        for keyword, code, weight in CLASS_SKILL_HINTS:
+        hints = CLASS_SKILL_HINTS_BY_LANG.get(current_lang(), CLASS_SKILL_HINTS_DE)
+        for keyword, code, weight in hints:
             if keyword in low:
                 self.votes.setdefault(name, Counter())[code] += weight
 
@@ -455,81 +839,233 @@ class ClassGuesser:
         return counter.most_common(1)[0][0]
 
 
-CRIT_PREFIX = "Kritischer Treffer!"
+def guess_class_from_skill(skill):
+    """One-off class guess from a single skill name, independent of any accumulated player
+    history - used by the dual-account self-split (see EncounterManager._resolve_self_identity),
+    not by the normal per-player ClassGuesser above."""
+    if not skill:
+        return None
+    low = skill.lower()
+    hints = CLASS_SKILL_HINTS_BY_LANG.get(current_lang(), CLASS_SKILL_HINTS_DE)
+    votes = Counter()
+    for keyword, code, weight in hints:
+        if keyword in low:
+            votes[code] += weight
+    if not votes:
+        return None
+    return votes.most_common(1)[0][0]
 
-DAMAGE_SKILL_RE = re.compile(
+
+def is_self_key(name):
+    """True for the log owner's own identity - either the plain 'Du', or, in dual-account mode,
+    one of the per-detected-class split identities like 'Du (Templer)'."""
+    return name == 'Du' or name.startswith('Du (')
+
+
+# --- Deutsch --------------------------------------------------------------
+CRIT_PREFIX_DE = "Kritischer Treffer!"
+
+DAMAGE_SKILL_RE_DE = re.compile(
     r'^(?P<attacker>.+?) (?:hat|habt) (?P<target>.+?) durch (?:Benutzung von )?'
     r'(?P<skill>.+?) (?P<amount>[0-9]+(?:\.[0-9]{3})*) (?:kritischen )?Schaden zugef\u00fcgt\.'
 )
-DAMAGE_PLAIN_RE = re.compile(
+DAMAGE_PLAIN_RE_DE = re.compile(
     r'^(?P<attacker>.+?) (?:hat|habt) (?P<target>.+?) '
     r'(?P<amount>[0-9]+(?:\.[0-9]{3})*) (?:kritischen )?Schaden zugef\u00fcgt\.'
 )
-HEAL_OTHER_RE = re.compile(
+HEAL_OTHER_RE_DE = re.compile(
     r'^(?P<target>.+?) (?:hat|habt) (?P<amount>[0-9]+(?:\.[0-9]{3})*) TP wiederhergestellt, '
     r'(?:da|weil) (?P<healer>.+?) (?P<skill>.+?) eingesetzt hat\.'
 )
-HEAL_SELF_RE = re.compile(
+HEAL_SELF_RE_DE = re.compile(
     r'^(?P<name>.+?) (?:hat|habt)(?: durch (?P<skill>.+?))? '
     r'(?P<amount>[0-9]+(?:\.[0-9]{3})*) TP wiederhergestellt\.'
 )
+# Pet/servant summon announcements (e.g. Spiritmaster elemental spirits, Cleric's "Diener") -
+# used to learn which player owns a pet, since the pet's own attacker name in damage lines is a
+# fixed generic name (e.g. "Erdgeist", "Heiliger Diener"), never the owner's name. Someone else's
+# summon: "[Caster] hat [Pet] durch [Skill] herbeigerufen." My own: "[Pet] durch [Skill]
+# herbeigerufen." (no subject at all - verified directly from client_strings_msg.xml, not a typo).
+SUMMON_OTHER_RE_DE = re.compile(r'^(?P<owner>.+?) hat (?P<pet>.+?) durch .+? herbeigerufen\.')
+SUMMON_SELF_RE_DE = re.compile(r'^(?:Ihr habt )?(?P<pet>.+?) durch .+? herbeigerufen\.')
 
 
-def parse_amount(s):
-    return int(s.replace('.', ''))
-
-
-def normalize_name(name):
+def normalize_name_de(name):
     return 'Du' if name in ('Ihr', 'ihr') else name
 
 
-def parse_line(line):
+def parse_amount_de(s):
+    return int(s.replace('.', ''))
+
+
+def parse_line_de(rest, crit):
+    m = DAMAGE_SKILL_RE_DE.match(rest)
+    if m:
+        target = m.group('target')
+        if target == 'Euch':
+            return None
+        return {
+            'type': 'damage', 'attacker': normalize_name_de(m.group('attacker')),
+            'target': normalize_name_de(target), 'amount': parse_amount_de(m.group('amount')),
+            'skill': m.group('skill'), 'crit': crit,
+        }
+    m = DAMAGE_PLAIN_RE_DE.match(rest)
+    if m:
+        target = m.group('target')
+        if target == 'Euch':
+            return None
+        return {
+            'type': 'damage', 'attacker': normalize_name_de(m.group('attacker')),
+            'target': normalize_name_de(target), 'amount': parse_amount_de(m.group('amount')),
+            'skill': 'Angriff', 'crit': crit,
+        }
+    m = HEAL_OTHER_RE_DE.match(rest)
+    if m:
+        return {
+            'type': 'heal', 'healer': normalize_name_de(m.group('healer')),
+            'target': normalize_name_de(m.group('target')), 'amount': parse_amount_de(m.group('amount')),
+            'skill': m.group('skill'), 'crit': crit,
+        }
+    m = HEAL_SELF_RE_DE.match(rest)
+    if m:
+        name = normalize_name_de(m.group('name'))
+        return {
+            'type': 'heal', 'healer': name, 'target': name,
+            'amount': parse_amount_de(m.group('amount')),
+            'skill': m.group('skill') or 'Regeneration', 'crit': crit,
+        }
+    m = SUMMON_OTHER_RE_DE.match(rest)
+    if m:
+        return {'type': 'summon', 'owner': normalize_name_de(m.group('owner')), 'pet': m.group('pet')}
+    m = SUMMON_SELF_RE_DE.match(rest)
+    if m:
+        return {'type': 'summon', 'owner': 'Du', 'pet': m.group('pet')}
+    return None
+
+
+# --- English ----------------------------------------------------------------
+# Built from this client's own retail combat message templates (L10N\deu\Data\data.pak and
+# L10N\eng\data\data.pak, strings/client_strings_msg.xml, joined by their language-independent
+# STR_MSG_.../STR_SKILL_SUCC_..._TO_... string IDs). Unlike German - which phrases every combat
+# line as "X hat Y Z Schaden zugefuegt" regardless of who's attacking whom - English uses TWO
+# different sentence shapes depending on perspective ("X inflicted Z damage on Y" when a party
+# member is the attacker, vs "Y received Z damage from X" when the target is on the player's
+# side), and healing has several more synonymous phrasings ("recovered"/"restored", "by using"/
+# "after using"/"due to the effect of"). The patterns below cover the shapes that matter for a
+# DPS/heal meter (outgoing party damage and both directions of party healing); incoming-monster-
+# damage lines ("received ... from") aren't tracked, same as German never tracks them either.
+CRIT_PREFIX_EN = "Critical Hit!"
+
+DAMAGE_SKILL_RE_EN = re.compile(
+    r'^(?P<attacker>.+?) (?:has )?inflicted (?P<amount>[0-9]+(?:,[0-9]{3})*) (?:critical )?damage on '
+    r'(?P<target>.+?) by using (?P<skill>.+?)\.'
+)
+DAMAGE_PLAIN_RE_EN = re.compile(
+    r'^(?P<attacker>.+?) (?:has )?inflicted (?P<amount>[0-9]+(?:,[0-9]{3})*) (?:critical )?damage on '
+    r'(?P<target>.+?)\.'
+)
+# Observer view: "X recovered N HP because Y used [Skill]." - the main cross-player heal case.
+HEAL_OTHER_RE_EN = re.compile(
+    r'^(?P<target>.+?) recovered (?P<amount>[0-9]+(?:,[0-9]{3})*) HP because '
+    r'(?P<healer>.+?) used (?P<skill>.+?)\.'
+)
+# Own-view: "You restored N of X's HP by using [Skill]." - seen by the healer casting on someone else.
+HEAL_MINE_RE_EN = re.compile(
+    r"^You restored (?P<amount>[0-9]+(?:,[0-9]{3})*) of (?P<target>.+?)'s HP by using (?P<skill>.+?)\."
+)
+# Self-heal with a named skill: "X recovered N HP (by|after) using [Skill]."
+HEAL_SELF_SKILL_RE_EN = re.compile(
+    r'^(?P<name>.+?) recovered (?P<amount>[0-9]+(?:,[0-9]{3})*) HP\b.*?\busing (?P<skill>.+?)\.'
+)
+# Plain regen tick, no skill named: "X recovered/restored N HP."
+HEAL_SELF_PLAIN_RE_EN = re.compile(
+    r'^(?P<name>.+?) (?:recovered|restored) (?P<amount>[0-9]+(?:,[0-9]{3})*) HP\.'
+)
+# Pet/servant summon announcement - always has an explicit subject in English ("You"/"[Caster]"),
+# so one pattern covers both my-own and someone-else's summon; normalize_name_en handles "You".
+SUMMON_RE_EN = re.compile(r'^(?P<owner>.+?) summoned (?P<pet>.+?) by using .+?\.')
+
+
+def normalize_name_en(name):
+    return 'Du' if name.lower() in ('you', 'yourself') else name
+
+
+def parse_amount_en(s):
+    return int(s.replace(',', ''))
+
+
+def parse_line_en(rest, crit):
+    m = DAMAGE_SKILL_RE_EN.match(rest)
+    if m:
+        target = m.group('target')
+        if target.lower() in ('you', 'yourself'):
+            return None
+        return {
+            'type': 'damage', 'attacker': normalize_name_en(m.group('attacker')),
+            'target': normalize_name_en(target), 'amount': parse_amount_en(m.group('amount')),
+            'skill': m.group('skill'), 'crit': crit,
+        }
+    m = DAMAGE_PLAIN_RE_EN.match(rest)
+    if m:
+        target = m.group('target')
+        if target.lower() in ('you', 'yourself'):
+            return None
+        return {
+            'type': 'damage', 'attacker': normalize_name_en(m.group('attacker')),
+            'target': normalize_name_en(target), 'amount': parse_amount_en(m.group('amount')),
+            'skill': 'Attack', 'crit': crit,
+        }
+    m = HEAL_OTHER_RE_EN.match(rest)
+    if m:
+        return {
+            'type': 'heal', 'healer': normalize_name_en(m.group('healer')),
+            'target': normalize_name_en(m.group('target')), 'amount': parse_amount_en(m.group('amount')),
+            'skill': m.group('skill'), 'crit': crit,
+        }
+    m = HEAL_MINE_RE_EN.match(rest)
+    if m:
+        return {
+            'type': 'heal', 'healer': 'Du', 'target': normalize_name_en(m.group('target')),
+            'amount': parse_amount_en(m.group('amount')), 'skill': m.group('skill'), 'crit': crit,
+        }
+    m = HEAL_SELF_SKILL_RE_EN.match(rest)
+    if m:
+        name = normalize_name_en(m.group('name'))
+        return {
+            'type': 'heal', 'healer': name, 'target': name,
+            'amount': parse_amount_en(m.group('amount')), 'skill': m.group('skill'), 'crit': crit,
+        }
+    m = HEAL_SELF_PLAIN_RE_EN.match(rest)
+    if m:
+        name = normalize_name_en(m.group('name'))
+        return {
+            'type': 'heal', 'healer': name, 'target': name,
+            'amount': parse_amount_en(m.group('amount')), 'skill': 'Regeneration', 'crit': crit,
+        }
+    m = SUMMON_RE_EN.match(rest)
+    if m:
+        return {'type': 'summon', 'owner': normalize_name_en(m.group('owner')), 'pet': m.group('pet')}
+    return None
+
+
+CRIT_PREFIX_BY_LANG = {'de': CRIT_PREFIX_DE, 'en': CRIT_PREFIX_EN}
+PARSE_LINE_BY_LANG = {'de': parse_line_de, 'en': parse_line_en}
+
+
+def parse_line(line, lang=None):
+    lang = lang or current_lang()
     line = line.rstrip('\r\n').strip()
     if ' : ' not in line:
         return None
     _, _, rest = line.partition(' : ')
     rest = rest.strip()
     crit = False
-    if rest.startswith(CRIT_PREFIX):
+    crit_prefix = CRIT_PREFIX_BY_LANG.get(lang, CRIT_PREFIX_DE)
+    if rest.startswith(crit_prefix):
         crit = True
-        rest = rest[len(CRIT_PREFIX):].lstrip()
-
-    m = DAMAGE_SKILL_RE.match(rest)
-    if m:
-        target = m.group('target')
-        if target == 'Euch':
-            return None
-        return {
-            'type': 'damage', 'attacker': normalize_name(m.group('attacker')),
-            'target': normalize_name(target), 'amount': parse_amount(m.group('amount')),
-            'skill': m.group('skill'), 'crit': crit,
-        }
-    m = DAMAGE_PLAIN_RE.match(rest)
-    if m:
-        target = m.group('target')
-        if target == 'Euch':
-            return None
-        return {
-            'type': 'damage', 'attacker': normalize_name(m.group('attacker')),
-            'target': normalize_name(target), 'amount': parse_amount(m.group('amount')),
-            'skill': 'Angriff', 'crit': crit,
-        }
-    m = HEAL_OTHER_RE.match(rest)
-    if m:
-        return {
-            'type': 'heal', 'healer': normalize_name(m.group('healer')),
-            'target': normalize_name(m.group('target')), 'amount': parse_amount(m.group('amount')),
-            'skill': m.group('skill'), 'crit': crit,
-        }
-    m = HEAL_SELF_RE.match(rest)
-    if m:
-        name = normalize_name(m.group('name'))
-        return {
-            'type': 'heal', 'healer': name, 'target': name,
-            'amount': parse_amount(m.group('amount')),
-            'skill': m.group('skill') or 'Regeneration', 'crit': crit,
-        }
-    return None
+        rest = rest[len(crit_prefix):].lstrip()
+    parser = PARSE_LINE_BY_LANG.get(lang, parse_line_de)
+    return parser(rest, crit)
 
 
 class Encounter:
@@ -571,7 +1107,7 @@ class Encounter:
             players.add(e['healer'])
             players.add(e['target'])
         for _, e in self.damage_events:
-            if e['attacker'] == 'Du':
+            if is_self_key(e['attacker']):
                 monsters.add(e['target'])
 
         changed = True
@@ -646,24 +1182,56 @@ class Encounter:
 class EncounterManager:
     def __init__(self, log_path):
         self.lock = threading.Lock()
-        self.session = Encounter(label='Gesamt-Sitzung')
+        self.session = Encounter(label=tr('total_session'))
         self.current = None
         self.history = []
         self.lines_processed = 0
-        self.log_status = 'Warte auf Log-Datei...'
+        self.log_status = tr('waiting_for_log')
         self.log_path = log_path
         self.class_guesser = ClassGuesser()
+        # pet/servant display name (e.g. "Erdgeist", "Heiliger Diener") -> owning player. A pet's
+        # own name in damage lines is a fixed generic string, never the owner's name, so ownership
+        # is only learnable from the summon-announcement line itself (see SUMMON_*_RE_DE/EN).
+        self.pet_owners = {}
+        # Sticky fallback class for dual-account mode - see _resolve_self_identity.
+        self._last_self_class = None
+
+    def _resolve_self_identity(self, name, skill):
+        """Opt-in (Settings.dual_account_mode): splits the single 'Du' self-identity into per-
+        detected-class sub-identities like 'Du (Templer)', so two accounts dual-boxed through one
+        shared Chat.log - where both write the identical pronoun 'Ihr'/'you' with no other mark -
+        show up as separate rows instead of merging into one. Off by default: for a normal single
+        account this would only ever fragment their own damage the moment an un-hinted skill (e.g.
+        plain 'Angriff') shows up, which is why it's never applied unless explicitly turned on.
+        Skills with no class hint stick to whichever class was most recently detected, since that's
+        usually still the same account mid-combo - imperfect, but the best available signal."""
+        if name != 'Du' or _SETTINGS is None or not getattr(_SETTINGS, 'dual_account_mode', False):
+            return name
+        code = guess_class_from_skill(skill)
+        if code:
+            self._last_self_class = code
+        elif self._last_self_class is None:
+            return name
+        label = class_labels().get(code or self._last_self_class)
+        return f'Du ({label})' if label else name
 
     def feed(self, ev):
         t = time.time()
         with self.lock:
+            if ev['type'] == 'summon':
+                self.pet_owners[ev['pet']] = ev['owner']
+                return
             if ev['type'] == 'damage':
+                ev['attacker'] = self.pet_owners.get(ev['attacker'], ev['attacker'])
+                ev['attacker'] = self._resolve_self_identity(ev['attacker'], ev.get('skill'))
                 self.class_guesser.observe(ev['attacker'], ev.get('skill'))
                 self.session.add_damage(ev, t)
                 if self.current is None:
                     self.current = Encounter()
                 self.current.add_damage(ev, t)
             else:
+                ev['healer'] = self.pet_owners.get(ev['healer'], ev['healer'])
+                ev['healer'] = self._resolve_self_identity(ev['healer'], ev.get('skill'))
                 self.class_guesser.observe(ev['healer'], ev.get('skill'))
                 self.session.add_heal(ev, t)
                 if self.current is not None:
@@ -696,21 +1264,21 @@ class EncounterManager:
 
     def reset_all(self):
         with self.lock:
-            self.session = Encounter(label='Gesamt-Sitzung')
+            self.session = Encounter(label=tr('total_session'))
             self.current = None
             self.history = []
 
     def get_labels(self):
         with self.lock:
-            labels = ['Live (aktueller Kampf)', 'Gesamt-Sitzung']
+            labels = [tr('live_label'), tr('total_session')]
             labels += [h.label for h in self.history]
             return labels
 
     def get_encounter_for_label(self, label):
         with self.lock:
-            if label == 'Gesamt-Sitzung':
+            if label == tr('total_session'):
                 return self.session
-            if label == 'Live (aktueller Kampf)':
+            if label == tr('live_label'):
                 if self.current is not None:
                     return self.current
                 return self.history[0] if self.history else None
@@ -737,13 +1305,13 @@ def tail_file(manager, stop_event):
 
             if fh is None:
                 if not os.path.exists(path):
-                    manager.log_status = f'Log nicht gefunden: {path}'
+                    manager.log_status = tr('log_not_found', path=path)
                     time.sleep(1.0)
                     continue
                 fh = open(path, 'r', encoding='cp1252', errors='replace', newline='')
                 fh.seek(0, os.SEEK_END)
                 pos = fh.tell()
-                manager.log_status = f'Verbunden: {path}'
+                manager.log_status = tr('connected', path=path)
 
             size = os.path.getsize(path)
             if size < pos:
@@ -766,10 +1334,10 @@ def tail_file(manager, stop_event):
             time.sleep(POLL_INTERVAL)
         except FileNotFoundError:
             fh = None
-            manager.log_status = f'Log nicht gefunden: {manager.log_path}'
+            manager.log_status = tr('log_not_found', path=manager.log_path)
             time.sleep(1.0)
         except Exception as exc:
-            manager.log_status = f'Fehler: {exc}'
+            manager.log_status = tr('error_generic', error=exc)
             time.sleep(1.0)
 
 
@@ -794,7 +1362,7 @@ class MeterRow:
     place(), which left a visible dark box behind text overlaid on the bar.
     Drawing everything on one canvas avoids that entirely.
     """
-    ROW_HEIGHT = 38
+    ROW_HEIGHT = 44
     RADIUS = 6
 
     def __init__(self, parent, fonts):
@@ -835,8 +1403,8 @@ class MeterRow:
                               smooth=True, fill='', outline=COL_INK_PRIMARY, width=2)
         text_x = 12
         if self.icon_photo is not None:
-            c.create_image(10, h / 2, anchor='w', image=self.icon_photo)
-            text_x = 10 + ICON_PX + 6
+            c.create_image(8, h / 2, anchor='w', image=self.icon_photo)
+            text_x = 8 + ICON_PX + 10
         c.create_text(text_x, h * 0.32, anchor='w', text=self.name_text,
                        fill=COL_INK_PRIMARY, font=self.fonts['name'])
         c.create_text(text_x, h * 0.76, anchor='w', text=self.sub_text,
@@ -849,7 +1417,7 @@ class MeterRow:
     def update(self, rank, name, value, pct_total, hits, crit_pct, rate, rate_label, color, is_self, icon_photo):
         prefix = '\u2605 ' if is_self else f'{rank}. '
         self.name_text = f'{prefix}{name}'
-        self.sub_text = f'{hits}x  \u00b7  {crit_pct:.0f}% Krit'
+        self.sub_text = f'{hits}x  \u00b7  {crit_pct:.0f}% {tr("crit_short")}'
         self.value_text = f'{fmt_num(value)}  ({pct_total:.1f}%)'
         self.rate_text = f'{fmt_num(int(rate))} {rate_label}'
         self.color = color
@@ -887,7 +1455,7 @@ class MeterList:
         self.scroll.columnconfigure(0, weight=1)
         self.rows = {}
         self.row_data = {}
-        self.empty_label = ctk.CTkLabel(self.scroll, text='Keine Daten in dieser Ansicht',
+        self.empty_label = ctk.CTkLabel(self.scroll, text=tr('no_data_view'),
                                          text_color=COL_INK_MUTED, font=fonts['sub'])
 
     def pack(self, **kw):
@@ -900,6 +1468,7 @@ class MeterList:
                 row.destroy()
             self.rows = {}
             self.row_data = {}
+            self.empty_label.configure(text=tr('no_data_view'))
             self.empty_label.grid(row=0, column=0, pady=20)
             return
         self.empty_label.grid_forget()
@@ -948,7 +1517,7 @@ class MeterList:
     def _open_row_menu(self, event, key):
         menu = tk.Menu(self.scroll, tearoff=0, bg=COL_TRACK, fg=COL_INK_PRIMARY,
                         activebackground=COL_ACCENT, activeforeground=COL_INK_PRIMARY, bd=0)
-        menu.add_command(label='Zeile kopieren', command=lambda k=key: self._copy_row(k))
+        menu.add_command(label=tr('copy_row'), command=lambda k=key: self._copy_row(k))
         self._popup(menu, event)
 
     def _copy_row(self, key):
@@ -956,7 +1525,7 @@ class MeterList:
         if not d:
             return
         text = (f"{d['name']}: {fmt_num(d['value'])} {d['unit_label']} ({d['pct_total']:.1f}%), "
-                f"{fmt_num(int(d['rate']))} {d['rate_label']}, {d['hits']}x, {d['crit_pct']:.0f}% Krit")
+                f"{fmt_num(int(d['rate']))} {d['rate_label']}, {d['hits']}x, {d['crit_pct']:.0f}% {tr('crit_short')}")
         self.scroll.clipboard_clear()
         self.scroll.clipboard_append(text)
         self.scroll.update()
@@ -983,9 +1552,9 @@ class MonsterDropdown:
         self._last_values = None
 
         self.frame = ctk.CTkFrame(parent, fg_color='transparent')
-        ctk.CTkLabel(self.frame, text='Ziel:', font=fonts['ui'],
+        ctk.CTkLabel(self.frame, text=tr('target_label'), font=fonts['ui'],
                      text_color=COL_INK_SECONDARY).pack(side='left', padx=(4, 8))
-        self.menu = ctk.CTkOptionMenu(self.frame, values=['Gesamt (alle Monster)'],
+        self.menu = ctk.CTkOptionMenu(self.frame, values=[tr('total_all_monsters')],
                                        width=320, height=32, corner_radius=8,
                                        fg_color=COL_TRACK, button_color=COL_TRACK,
                                        button_hover_color=COL_ACCENT, dropdown_fg_color=COL_TRACK,
@@ -1010,7 +1579,7 @@ class MonsterDropdown:
             self._last_values = values
         if self.selected not in self.key_to_label:
             self.selected = None
-        current_label = self.key_to_label.get(self.selected, values[0] if values else 'Gesamt (alle Monster)')
+        current_label = self.key_to_label.get(self.selected, values[0] if values else tr('total_all_monsters'))
         self.menu.set(current_label)
 
     def _on_change(self, label):
@@ -1030,17 +1599,35 @@ class SettingsWindow:
         self.class_menus = {}
 
         self.top = ctk.CTkToplevel(root)
-        self.top.title('Optionen')
-        self.top.geometry('460x600')
+        self.top.title(tr('settings_title'))
+        self.top.geometry('460x760')
         self.top.configure(fg_color=COL_PAGE)
-        self.top.minsize(380, 400)
+        self.top.minsize(380, 500)
         self.top.lift()
         self.top.focus_force()
 
         pad = {'padx': 16}
 
-        ctk.CTkLabel(self.top, text='Spielpfad (Chat.log):', font=fonts['ui'],
+        ctk.CTkLabel(self.top, text=tr('language_label'), font=fonts['ui'],
                      text_color=COL_INK_SECONDARY).pack(anchor='w', pady=(16, 4), **pad)
+        self.lang_options = [('de', 'Deutsch'), ('en', 'English')]
+        lang_label_by_code = dict(self.lang_options)
+        lang_code_by_label = {v: k for k, v in self.lang_options}
+        self.lang_menu = ctk.CTkOptionMenu(self.top, values=[v for _, v in self.lang_options],
+                                            width=170, height=28, corner_radius=6,
+                                            fg_color=COL_TRACK, button_color=COL_TRACK,
+                                            button_hover_color=COL_ACCENT, dropdown_fg_color=COL_TRACK,
+                                            dropdown_hover_color=COL_ACCENT, text_color=COL_INK_PRIMARY,
+                                            font=fonts['sub'],
+                                            command=lambda label: self.settings.set_language(
+                                                lang_code_by_label.get(label, 'de')))
+        self.lang_menu.set(lang_label_by_code.get(settings.language, 'Deutsch'))
+        self.lang_menu.pack(anchor='w', **pad)
+        ctk.CTkLabel(self.top, text=tr('language_hint'), font=fonts['sub'], text_color=COL_INK_MUTED,
+                     wraplength=420, justify='left').pack(anchor='w', pady=(4, 0), **pad)
+
+        ctk.CTkLabel(self.top, text=tr('log_path_label'), font=fonts['ui'],
+                     text_color=COL_INK_SECONDARY).pack(anchor='w', pady=(14, 4), **pad)
         path_row = ctk.CTkFrame(self.top, fg_color='transparent')
         path_row.pack(fill='x', **pad)
         self.path_entry = ctk.CTkEntry(path_row, font=fonts['ui'], fg_color=COL_TRACK,
@@ -1051,17 +1638,26 @@ class SettingsWindow:
                       fg_color=COL_TRACK, hover_color=COL_ACCENT, text_color=COL_INK_PRIMARY,
                       font=fonts['ui'], command=self._browse).pack(side='left', padx=(6, 0))
 
-        ctk.CTkLabel(self.top, text='Dein Charaktername:', font=fonts['ui'],
+        ctk.CTkLabel(self.top, text=tr('char_name_label'), font=fonts['ui'],
                      text_color=COL_INK_SECONDARY).pack(anchor='w', pady=(14, 4), **pad)
         self.name_entry = ctk.CTkEntry(self.top, font=fonts['ui'], fg_color=COL_TRACK,
                                         border_color=COL_BORDER, text_color=COL_INK_PRIMARY)
         self.name_entry.insert(0, settings.character_name)
         self.name_entry.pack(fill='x', **pad)
 
-        ctk.CTkLabel(self.top, text='Klassen zuweisen:', font=fonts['ui'],
+        self.dual_var = tk.BooleanVar(value=settings.dual_account_mode)
+        ctk.CTkCheckBox(self.top, text=tr('dual_account_label'), font=fonts['ui'],
+                         text_color=COL_INK_SECONDARY, fg_color=COL_ACCENT, hover_color=COL_ACCENT,
+                         variable=self.dual_var,
+                         command=lambda: self.settings.set_dual_account_mode(self.dual_var.get())
+                         ).pack(anchor='w', pady=(16, 4), **pad)
+        ctk.CTkLabel(self.top, text=tr('dual_account_hint'), font=fonts['sub'],
+                     text_color=COL_INK_MUTED, wraplength=420,
+                     justify='left').pack(anchor='w', pady=(0, 0), **pad)
+
+        ctk.CTkLabel(self.top, text=tr('assign_classes_label'), font=fonts['ui'],
                      text_color=COL_INK_SECONDARY).pack(anchor='w', pady=(14, 4), **pad)
-        ctk.CTkLabel(self.top, text='Automatisch erkannte Vorschläge sind bereits ausgewählt - '
-                                     'nur bei Bedarf ändern. Manuelle Auswahl hat immer Vorrang.',
+        ctk.CTkLabel(self.top, text=tr('assign_classes_hint'),
                      font=fonts['sub'], text_color=COL_INK_MUTED, wraplength=420,
                      justify='left').pack(anchor='w', pady=(0, 6), **pad)
         self.class_scroll = ctk.CTkScrollableFrame(self.top, fg_color=COL_TRACK, corner_radius=8)
@@ -1071,46 +1667,48 @@ class SettingsWindow:
 
         btn_row = ctk.CTkFrame(self.top, fg_color='transparent')
         btn_row.pack(fill='x', padx=16, pady=(0, 16))
-        ctk.CTkButton(btn_row, text='Speichern & Schließen', height=34, corner_radius=8,
+        ctk.CTkButton(btn_row, text=tr('save_close'), height=34, corner_radius=8,
                       fg_color=COL_ACCENT, hover_color=COL_ACCENT, text_color=COL_INK_PRIMARY,
                       font=fonts['ui'], command=self._save_close).pack(side='right')
-        ctk.CTkButton(btn_row, text='Abbrechen', height=34, corner_radius=8,
+        ctk.CTkButton(btn_row, text=tr('cancel'), height=34, corner_radius=8,
                       fg_color=COL_TRACK, hover_color=COL_TRACK_HOVER, text_color=COL_INK_PRIMARY,
                       font=fonts['ui'], command=self.top.destroy).pack(side='right', padx=(0, 8))
-        ctk.CTkButton(btn_row, text=f'Nach Updates suchen (v{APP_VERSION})', height=34, corner_radius=8,
+        ctk.CTkButton(btn_row, text=tr('check_updates', version=APP_VERSION), height=34, corner_radius=8,
                       fg_color=COL_TRACK, hover_color=COL_TRACK_HOVER, text_color=COL_INK_PRIMARY,
                       font=fonts['ui'], command=on_check_update).pack(side='left')
 
     def _browse(self):
         path = filedialog.askopenfilename(
-            parent=self.top, title='Chat.log auswählen',
-            filetypes=[('Log-Datei', '*.log'), ('Alle Dateien', '*.*')])
+            parent=self.top, title=tr('choose_log_title'),
+            filetypes=[(tr('log_file_filter'), '*.log'), (tr('all_files_filter'), '*.*')])
         if path:
             self.path_entry.delete(0, 'end')
             self.path_entry.insert(0, path)
 
     def _populate_classes(self, known_players):
         if not known_players:
-            ctk.CTkLabel(self.class_scroll, text='Noch keine Spieler erkannt - starte einen Kampf.',
+            ctk.CTkLabel(self.class_scroll, text=tr('no_players_yet'),
                          font=self.fonts['sub'], text_color=COL_INK_MUTED).grid(
                 row=0, column=0, sticky='w', padx=8, pady=8)
             return
         display_name = self.settings.character_name
+        labels = class_labels()
+        by_label = code_by_label()
         for i, name in enumerate(sorted(known_players)):
-            shown = f'{display_name} (Du)' if name == 'Du' and display_name else name
+            shown = f'{display_name}{tr("you_suffix")}' if name == 'Du' and display_name else name
             row = ctk.CTkFrame(self.class_scroll, fg_color='transparent')
             row.grid(row=i, column=0, sticky='ew', pady=2)
             row.columnconfigure(0, weight=1)
             ctk.CTkLabel(row, text=shown, font=self.fonts['ui'],
                          text_color=COL_INK_PRIMARY).grid(row=0, column=0, sticky='w', padx=(4, 8))
-            values = [label for _, label in CLASS_ORDER] + ['Unbekannt']
+            values = [labels[code] for code in CLASS_ORDER] + [labels['unknown']]
             menu = ctk.CTkOptionMenu(row, values=values, width=170, height=28, corner_radius=6,
                                       fg_color=COL_PAGE, button_color=COL_PAGE,
                                       button_hover_color=COL_ACCENT, dropdown_fg_color=COL_TRACK,
                                       dropdown_hover_color=COL_ACCENT, text_color=COL_INK_PRIMARY,
                                       font=self.fonts['sub'])
-            menu.set(CLASS_LABELS.get(self.class_resolver(name), 'Unbekannt'))
-            menu.configure(command=lambda label, n=name: self.settings.set_class(n, CODE_BY_LABEL.get(label, 'unknown')))
+            menu.set(labels.get(self.class_resolver(name), labels['unknown']))
+            menu.configure(command=lambda label, n=name: self.settings.set_class(n, by_label.get(label, 'unknown')))
             menu.grid(row=0, column=1, sticky='e')
             self.class_menus[name] = menu
 
@@ -1129,22 +1727,22 @@ class UpdateDialog:
         self.on_launch_installer = on_launch_installer
 
         self.top = ctk.CTkToplevel(root)
-        self.top.title('Update verfügbar')
+        self.top.title(tr('update_available_title'))
         self.top.geometry('440x380')
         self.top.configure(fg_color=COL_PAGE)
         self.top.minsize(360, 320)
         self.top.lift()
         self.top.focus_force()
 
-        ctk.CTkLabel(self.top, text=f'Neue Version verfügbar: {info["version"]}',
+        ctk.CTkLabel(self.top, text=tr('update_available_new', version=info['version']),
                      font=fonts['name'], text_color=COL_ACCENT).pack(anchor='w', padx=16, pady=(16, 2))
-        ctk.CTkLabel(self.top, text=f'Installiert: v{APP_VERSION}',
+        ctk.CTkLabel(self.top, text=tr('update_installed', version=APP_VERSION),
                      font=fonts['sub'], text_color=COL_INK_MUTED).pack(anchor='w', padx=16)
 
         body = ctk.CTkTextbox(self.top, fg_color=COL_TRACK, text_color=COL_INK_SECONDARY,
                                font=fonts['sub'], wrap='word', corner_radius=8)
         body.pack(fill='both', expand=True, padx=16, pady=12)
-        body.insert('1.0', info['body'] or '(kein Änderungsprotokoll)')
+        body.insert('1.0', info['body'] or tr('no_changelog'))
         body.configure(state='disabled')
 
         self.status_label = ctk.CTkLabel(self.top, text='', font=fonts['sub'], text_color=COL_INK_MUTED)
@@ -1152,17 +1750,17 @@ class UpdateDialog:
 
         btn_row = ctk.CTkFrame(self.top, fg_color='transparent')
         btn_row.pack(fill='x', padx=16, pady=(4, 16))
-        self.update_btn = ctk.CTkButton(btn_row, text='Jetzt aktualisieren', height=34, corner_radius=8,
+        self.update_btn = ctk.CTkButton(btn_row, text=tr('update_now'), height=34, corner_radius=8,
                                          fg_color=COL_ACCENT, hover_color=COL_ACCENT,
                                          text_color=COL_INK_PRIMARY, font=fonts['ui'],
                                          command=self._start_update)
         self.update_btn.pack(side='right')
-        ctk.CTkButton(btn_row, text='Später', height=34, corner_radius=8,
+        ctk.CTkButton(btn_row, text=tr('later'), height=34, corner_radius=8,
                       fg_color=COL_TRACK, hover_color=COL_TRACK_HOVER, text_color=COL_INK_PRIMARY,
                       font=fonts['ui'], command=self.top.destroy).pack(side='right', padx=(0, 8))
 
     def _start_update(self):
-        self.update_btn.configure(state='disabled', text='Lädt herunter...')
+        self.update_btn.configure(state='disabled', text=tr('downloading'))
         self.status_label.configure(text='0%')
         threading.Thread(target=self._download_worker, daemon=True).start()
 
@@ -1176,15 +1774,14 @@ class UpdateDialog:
 
     def _on_progress(self, downloaded, total):
         pct = int(downloaded / total * 100) if total else 0
-        self.top.after(0, lambda: self.status_label.configure(text=f'{pct}% heruntergeladen'))
+        self.top.after(0, lambda: self.status_label.configure(text=tr('downloaded_pct', pct=pct)))
 
     def _fail(self, exc):
-        self.status_label.configure(text=f'Fehler beim Herunterladen: {exc}')
-        self.update_btn.configure(state='normal', text='Erneut versuchen')
+        self.status_label.configure(text=tr('download_error', error=exc))
+        self.update_btn.configure(state='normal', text=tr('retry'))
 
     def _finish(self, installer_path):
-        self.status_label.configure(text='Download fertig - Installation läuft. '
-                                          'Bitte danach das Programm neu öffnen.')
+        self.status_label.configure(text=tr('download_done'))
         self.top.after(1200, lambda: self.on_launch_installer(installer_path))
 
 
@@ -1194,7 +1791,7 @@ class MeterApp:
         self.manager = manager
         self.settings = settings
         self.on_quit = on_quit
-        self.encounter_value = 'Live (aktueller Kampf)'
+        self.encounter_value = tr('live_label')
         self._last_summary = None
         self._last_encounter_labels = None
         self.known_players = set()
@@ -1203,7 +1800,7 @@ class MeterApp:
         pil_icons = build_class_icons()
         self.icon_photos = {code: ImageTk.PhotoImage(img) for code, img in pil_icons.items()}
 
-        root.title('Aion 4.6 DPS-Meter')
+        root.title(tr('app_title'))
         root.geometry('1020x700')
         root.configure(fg_color=COL_PAGE)
         root.minsize(760, 480)
@@ -1226,7 +1823,7 @@ class MeterApp:
 
         title_row = ctk.CTkFrame(top, fg_color='transparent')
         title_row.pack(side='left')
-        ctk.CTkLabel(title_row, text='AION DPS METER', font=self.fonts['title'],
+        ctk.CTkLabel(title_row, text=tr('app_header'), font=self.fonts['title'],
                      text_color=COL_ACCENT).pack(side='left')
         ctk.CTkLabel(title_row, text=f'v{APP_VERSION}', font=self.fonts['caption'],
                      text_color=COL_INK_MUTED).pack(side='left', padx=(8, 0), pady=(6, 0))
@@ -1234,24 +1831,24 @@ class MeterApp:
         right_controls = ctk.CTkFrame(top, fg_color='transparent')
         right_controls.pack(side='right')
 
-        self.update_btn = ctk.CTkButton(right_controls, text='Update verfügbar', width=130, height=32,
+        self.update_btn = ctk.CTkButton(right_controls, text=tr('update_available_title'), width=130, height=32,
                                          corner_radius=8, fg_color='#2ea62e', hover_color='#268f26',
                                          text_color=COL_INK_PRIMARY, font=self.fonts['ui'],
                                          command=self.on_show_update)
 
-        self.reset_btn = ctk.CTkButton(right_controls, text='Reset', width=84, height=32, corner_radius=8,
+        self.reset_btn = ctk.CTkButton(right_controls, text=tr('reset'), width=84, height=32, corner_radius=8,
                                         fg_color=COL_TRACK, hover_color=COL_DANGER,
                                         text_color=COL_INK_PRIMARY, font=self.fonts['ui'],
                                         command=self.on_reset)
         self.reset_btn.pack(side='right', padx=(8, 0))
 
-        self.settings_btn = ctk.CTkButton(right_controls, text='Optionen', width=90, height=32, corner_radius=8,
+        self.settings_btn = ctk.CTkButton(right_controls, text=tr('options'), width=90, height=32, corner_radius=8,
                                            fg_color=COL_TRACK, hover_color=COL_TRACK_HOVER,
                                            text_color=COL_INK_PRIMARY, font=self.fonts['ui'],
                                            command=self.on_open_settings)
         self.settings_btn.pack(side='right', padx=(8, 0))
 
-        self.copy_btn = ctk.CTkButton(right_controls, text='Kopieren', width=96, height=32, corner_radius=8,
+        self.copy_btn = ctk.CTkButton(right_controls, text=tr('copy'), width=96, height=32, corner_radius=8,
                                        fg_color=COL_TRACK, hover_color=COL_ACCENT,
                                        text_color=COL_INK_PRIMARY, font=self.fonts['ui'],
                                        command=self.on_copy)
@@ -1271,8 +1868,8 @@ class MeterApp:
         stats_row = ctk.CTkFrame(root, fg_color=COL_PAGE, corner_radius=0)
         stats_row.pack(fill='x', padx=16, pady=(10, 4))
         self.stat_values = {}
-        for key, caption in [('dur', 'Dauer'), ('dmg', 'Gesamtschaden'),
-                              ('dps', 'Raid-DPS'), ('heal', 'Gesamtheilung')]:
+        for key, caption in [('dur', tr('stat_duration')), ('dmg', tr('stat_damage')),
+                              ('dps', tr('stat_dps')), ('heal', tr('stat_heal'))]:
             card = ctk.CTkFrame(stats_row, fg_color=COL_TRACK, corner_radius=12)
             card.pack(side='left', expand=True, fill='x', padx=(0 if key == 'dur' else 6, 0))
             ctk.CTkLabel(card, text=caption, font=self.fonts['caption'],
@@ -1290,16 +1887,18 @@ class MeterApp:
                                        segmented_button_unselected_hover_color=COL_TRACK_HOVER,
                                        text_color=COL_INK_PRIMARY)
         self.tabview.pack(fill='both', expand=True, padx=16, pady=8)
-        self.tabview.add('Schaden')
-        self.tabview.add('Heilung')
+        self.tab_damage_name = tr('tab_damage')
+        self.tab_heal_name = tr('tab_heal')
+        self.tabview.add(self.tab_damage_name)
+        self.tabview.add(self.tab_heal_name)
 
-        dmg_tab = self.tabview.tab('Schaden')
+        dmg_tab = self.tabview.tab(self.tab_damage_name)
         self.monster_dropdown = MonsterDropdown(dmg_tab, self.fonts, on_select=self.on_target_select)
         self.monster_dropdown.pack(fill='x', padx=2, pady=(0, 8))
         self.dmg_list = MeterList(dmg_tab, self.fonts, self._resolve_class, self.icon_photos)
         self.dmg_list.pack(fill='both', expand=True, padx=2, pady=2)
 
-        heal_tab = self.tabview.tab('Heilung')
+        heal_tab = self.tabview.tab(self.tab_heal_name)
         self.heal_list = MeterList(heal_tab, self.fonts, self._resolve_class, self.icon_photos)
         self.heal_list.pack(fill='both', expand=True, padx=2, pady=2)
 
@@ -1337,7 +1936,7 @@ class MeterApp:
         if info is not None:
             self.update_btn.pack(side='right', padx=(8, 0))
         elif manual:
-            self.status_label.configure(text='Kein Update verfügbar - du bist aktuell.')
+            self.status_label.configure(text=tr('no_update_current'))
 
     def on_show_update(self):
         if self.update_info is not None:
@@ -1362,9 +1961,9 @@ class MeterApp:
             return
         dur = self._last_summary['duration']
         active = self.tabview.get()
-        if active == 'Schaden':
+        if active == self.tab_damage_name:
             selected = self.monster_dropdown.selected
-            target = selected if selected else 'Gesamt'
+            target = selected if selected else tr('copy_total_fallback')
             header = f"DPS {target} ({dur:.0f}s)"
             self.dmg_list.copy_all(header)
         else:
@@ -1381,8 +1980,8 @@ class MeterApp:
         try:
             active = self.tabview.get()
         except Exception:
-            active = 'Schaden'
-        if active == 'Schaden':
+            active = self.tab_damage_name
+        if active == self.tab_damage_name:
             self.dmg_list.tick()
         else:
             self.heal_list.tick()
@@ -1399,7 +1998,7 @@ class MeterApp:
 
         enc = self.manager.get_encounter_for_label(self.encounter_value)
         if enc is not None:
-            is_live_current = (self.encounter_value == 'Live (aktueller Kampf)' and
+            is_live_current = (self.encounter_value == tr('live_label') and
                                 self.manager.current is not None)
             summary = enc.summarize(use_cache=not is_live_current and enc is not self.manager.session)
             self._last_summary = summary
@@ -1414,12 +2013,12 @@ class MeterApp:
             self.stat_values['dmg'].configure(text='-')
             self.stat_values['dps'].configure(text='-')
             self.stat_values['heal'].configure(text='-')
-            self.monster_dropdown.render([(None, 'Gesamt (alle Monster)')])
-            self.dmg_list.render([], 'Schaden', 'DPS')
-            self.heal_list.render([], 'Heilung', 'HPS')
+            self.monster_dropdown.render([(None, tr('total_all_monsters'))])
+            self.dmg_list.render([], tr('unit_damage'), 'DPS')
+            self.heal_list.render([], tr('unit_heal'), 'HPS')
 
         self.status_label.configure(
-            text=f"{self.manager.log_status}   \u00b7   Zeilen verarbeitet: {fmt_num(self.manager.lines_processed)}"
+            text=f"{self.manager.log_status}   \u00b7   {tr('lines_processed', n=fmt_num(self.manager.lines_processed))}"
         )
         self.root.after(REFRESH_MS, self.refresh)
 
@@ -1436,7 +2035,7 @@ class MeterApp:
         return key
 
     def render_damage(self, summary):
-        chips = [(None, 'Gesamt (alle Monster)')]
+        chips = [(None, tr('total_all_monsters'))]
         for mon, mtotal, mdur, rows in summary['monster_totals']:
             chips.append((mon, mon))
         self.monster_dropdown.render(chips)
@@ -1447,7 +2046,7 @@ class MeterApp:
             items = [
                 (name, self._display_name(name), row['damage'], row['hits'],
                  (row['crits'] / row['hits'] * 100) if row['hits'] else 0,
-                 row['damage'] / dur if dur else 0, name == 'Du')
+                 row['damage'] / dur if dur else 0, is_self_key(name))
                 for name, row in summary['overall'].items()
             ]
         else:
@@ -1459,26 +2058,32 @@ class MeterApp:
                 items = [
                     (name, self._display_name(name), row['damage'], row['hits'],
                      (row['crits'] / row['hits'] * 100) if row['hits'] else 0,
-                     row['damage'] / mdur if mdur else 0, name == 'Du')
+                     row['damage'] / mdur if mdur else 0, is_self_key(name))
                     for name, row in rows.items()
                 ]
         items.sort(key=lambda it: -it[2])
-        self.dmg_list.render(items, 'Schaden', 'DPS')
+        self.dmg_list.render(items, tr('unit_damage'), 'DPS')
 
     def render_heal(self, summary):
         dur = summary['duration']
         items = [
             (name, self._display_name(name), row['heal'], row['ticks'],
              (row['crits'] / row['ticks'] * 100) if row['ticks'] else 0,
-             row['heal'] / dur if dur else 0, name == 'Du')
+             row['heal'] / dur if dur else 0, is_self_key(name))
             for name, row in summary['heal_totals'].items()
         ]
         items.sort(key=lambda it: -it[2])
-        self.heal_list.render(items, 'Heilung', 'HPS')
+        self.heal_list.render(items, tr('unit_heal'), 'HPS')
 
 
 def main():
-    settings = Settings()
+    global _SETTINGS
+    # Optional 2nd arg: a profile name, so a second instance (e.g. a dual-box twink reading a
+    # second Chat.log) keeps its own separate settings file instead of sharing - and overwriting
+    # - the main instance's log path, character name and class assignments.
+    profile = sys.argv[2] if len(sys.argv) > 2 else None
+    settings = Settings(profile=profile)
+    _SETTINGS = settings
     if len(sys.argv) > 1:
         settings.set_log_path(sys.argv[1])
 
