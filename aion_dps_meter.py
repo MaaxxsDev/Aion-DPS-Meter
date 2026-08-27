@@ -15,7 +15,7 @@ from tkinter import filedialog
 import customtkinter as ctk
 from PIL import Image, ImageDraw, ImageTk
 
-APP_VERSION = '1.0.1'
+APP_VERSION = '1.1.0'
 GITHUB_REPO = 'MaaxxsDev/Aion-DPS-Meter'
 GITHUB_API_LATEST = f'https://api.github.com/repos/{GITHUB_REPO}/releases/latest'
 
@@ -229,68 +229,208 @@ class Settings:
         self._save()
 
 
-# Best-effort Stichwoerter aus echten Aion-Skillnamen -> Klasse, gewichtet.
-# Kein verifiziertes Mapping (Privatserver koennte Skills umbenannt/angepasst haben) -
-# nur ein automatischer Vorschlag, der jederzeit im Optionsfenster ueberschrieben werden kann.
-#
-# "confirmed" = per Websuche in echten deutschen Aion-Quellen (offizielles Gameforge-Forum,
-# Community-Guides) belegt, u.a. die Korrektur von "Klinge der Provokation" (faelschlich als
-# Templer erkannt) -> das ist tatsaechlich ein Gladiator-Skill. Mehrwort-Phrasen sind bevorzugt,
-# da einzelne Woerter wie "Provokation" oder "Schild" quer durch mehrere Klassen vorkommen und
-# genau diese Art von Fehlzuordnung verursachen.
+# Datenquelle: aus dem AionGermany/aion-germany Emulator-Projekt (GitHub) extrahiert -
+# skill_tree.xml (Skill->Klassen-ID, echte Spielmechanik) verknuepft mit den tatsaechlichen
+# deutschen Skillnamen aus diesem Client (D:\Origin\L10N\2_deu\data\Strings\
+# client_strings_skill.xml). Nur Skills, die eindeutig und ueber alle Raenge hinweg konsistent
+# genau einer Klasse zugeordnet sind - mehrdeutige/geteilte Basis-Skills sowie Eintraege, die
+# als Teilstring in einem Skill einer ANDEREN Klasse vorkommen (z.B. "Urteil" in
+# "Urteilsschlinge"), wurden automatisch aussortiert, um Fehlzuordnungen wie bei den fruehen
+# Handeintraegen zu vermeiden. Ergaenzt um Skills, die im echten Chat.log dieses Servers
+# bestaetigt beobachtet wurden.
 CLASS_SKILL_HINTS = [
-    # Waldlaeufer (Ranger) - confirmed: Wuergepfeil, Dornenwaechter, Behindernder Schuss,
-    # Erdbebenschuss, Narbe des Haumessers, Waldgeist; + aus echtem Log dieses Servers
-    ('würgepfeil', 'ranger', 3), ('dornenwächter', 'ranger', 3), ('behindernder schuss', 'ranger', 3),
-    ('erdbebenschuss', 'ranger', 3), ('narbe des haumessers', 'ranger', 3), ('waldgeist', 'ranger', 3),
-    ('zerreißender pfeil', 'ranger', 3), ('todesschuss', 'ranger', 3), ('schwächender pfeil', 'ranger', 3),
-    ('urteilsschlinge', 'ranger', 3), ('federsturm', 'ranger', 3),
-    # 'schuss'/'falle' entfernt: zu kurz/generisch, hoechstes Kollisionsrisiko mit unbekannten
-    # Skills anderer Klassen (siehe Kleriker->faelschlich Waldlaeufer Bugreport, Ursache unklar).
-    ('pfeil', 'ranger', 2), ('bogen', 'ranger', 2),
+    # Waldlaeufer (52)
+    ('atem der natur', 'ranger', 3), ('auge des angriffs', 'ranger', 3), ('betäubender schuss', 'ranger', 3),
+    ('blitzpfeil', 'ranger', 3), ('bogen des segens', 'ranger', 3), ('bogenreichweite erhöhen', 'ranger', 3),
+    ('böenpfeil', 'ranger', 3), ('entschlossener widerstand', 'ranger', 3),
+    ('entschlossenheit des jägers', 'ranger', 3), ('explosionspfeil', 'ranger', 3),
+    ('falle der hellsicht', 'ranger', 3), ('falle des rachegeistes', 'ranger', 3),
+    ('falle: abbremsen', 'ranger', 3), ('falle: sandsturm', 'ranger', 3), ('falle: schock', 'ranger', 3),
+    ('federsturm', 'ranger', 3), ('fesselpfeil', 'ranger', 3), ('finaler sturmangriff', 'ranger', 3),
+    ('flug: angriffsreichweite erhöhen', 'ranger', 3), ('flug: segen des pfeilgottes', 'ranger', 3),
+    ('griffonix-pfeil', 'ranger', 3), ('heckenschuss', 'ranger', 3), ('lodernde falle', 'ranger', 3),
+    ('parieren erhöhen', 'ranger', 3), ('pfeil des anfalls', 'ranger', 3), ('pfeil des siegels', 'ranger', 3),
+    ('pfeil des tobenden windes', 'ranger', 3), ('pfeile schärfen', 'ranger', 3), ('pfeilhagel', 'ranger', 3),
+    ('pfeilschlag', 'ranger', 3), ('präzision erhöhen', 'ranger', 3), ('quälender pfeil', 'ranger', 3),
+    ('raserei des mistral', 'ranger', 3), ('rückzugsschlag', 'ranger', 3), ('schlaffalle', 'ranger', 3),
+    ('schlafpfeil', 'ranger', 3), ('schneller atem', 'ranger', 3), ('schweigepfeil', 'ranger', 3),
+    ('schwächender pfeil', 'ranger', 3), ('sofortiges sprinten', 'ranger', 3), ('spiralpfeil', 'ranger', 3),
+    ('stärkendes auge', 'ranger', 3), ('tigerauge', 'ranger', 3), ('todesschuss', 'ranger', 3),
+    ('tödlicher pfeil', 'ranger', 3), ('umschlingender schuss', 'ranger', 3), ('urteilsschlinge', 'ranger', 3),
+    ('verwandlung: mau', 'ranger', 3), ('vorsichtiges auge', 'ranger', 3), ('zerreißender pfeil', 'ranger', 3),
+    ('zielgenauer pfeil', 'ranger', 3), ('äther-pfeil', 'ranger', 3),
 
-    # Kleriker (Cleric) - ACHTUNG: Zerschmettern, Segen der Gesundheit, Geheiligter Schlag,
-    # Himmelsurteil, Licht der Wiederauferstehung, Versprechen des Windes und Licht der
-    # Erneuerung sind laut Quelle (5secrule.de) Basis-Skills, die BEIDE Priester-Spezialisierungen
-    # (Kleriker und Kantor) gleichermassen nutzen koennen - deshalb bewusst NICHT als Kleriker-Hinweis
-    # gelistet (das war die Ursache dafuer, dass ein Kantor faelschlich als Kleriker erkannt wurde).
-    # Nur aus echtem Log dieses Servers, nicht in der oben genannten Shared-Liste enthalten:
-    ('yustiel', 'cleric', 3), ('heilende pracht', 'cleric', 3), ('blitz-wiederherstellung', 'cleric', 3),
-    ('strahlende heilung', 'cleric', 3), ('licht der verjüngung', 'cleric', 2),
-    ('welle der absorption', 'cleric', 1),
+    # Kleriker (53)
+    ('aions sturm', 'cleric', 3), ('amplifikation', 'cleric', 3), ('beschwörung: edle energie', 'cleric', 3),
+    ('beschwörung: heilende energie', 'cleric', 3), ('beschwörung: heiliger diener', 'cleric', 3),
+    ('bestrafende erde', 'cleric', 3), ('blendendes licht', 'cleric', 3), ('blitz der vergeltung', 'cleric', 3),
+    ('blitz des göttlichen angriffs', 'cleric', 3), ('blitz herbeirufen', 'cleric', 3),
+    ('blitz-wiederherstellung', 'cleric', 3), ('edle anmut', 'cleric', 3), ('eiternde wunde', 'cleric', 3),
+    ('explosion der macht', 'cleric', 3), ('flug: erholung verbessern', 'cleric', 3),
+    ('flug: segen des heilgottes', 'cleric', 3), ('freispruch', 'cleric', 3), ('gebet des fokus', 'cleric', 3),
+    ('geheiligter schlag', 'cleric', 3), ('gesegneter schild', 'cleric', 3), ('göttliche berührung', 'cleric', 3),
+    ('göttlicher funke', 'cleric', 3), ('hand der reinkarnation', 'cleric', 3), ('heilende pracht', 'cleric', 3),
+    ('heilung erhöhen', 'cleric', 3), ('kette des leidens', 'cleric', 3), ('licht der verjüngung', 'cleric', 3),
+    ('licht der wiederauferstehung', 'cleric', 3), ('licht der wiederherstellung', 'cleric', 3),
+    ('macht der zerstörung', 'cleric', 3), ('mitfühlende heilung', 'cleric', 3),
+    ('pandämonium-schutz', 'cleric', 3), ('pracht der reinigung', 'cleric', 3),
+    ('pracht der wiedergeburt', 'cleric', 3), ('pracht der wiederherstellung', 'cleric', 3),
+    ('reinigendes licht', 'cleric', 3), ('rettende hand', 'cleric', 3), ('schwächende explosion', 'cleric', 3),
+    ('sprint-fertigkeit', 'cleric', 3), ('strahlende heilung', 'cleric', 3),
+    ('undurchdringlicher schleier', 'cleric', 3), ('unsterblicher mantel', 'cleric', 3),
+    ('welle der absorption', 'cleric', 3), ('welle der reinigung', 'cleric', 3),
+    ('wiederauferstehungs-beschwörung', 'cleric', 3), ('wissen des weisen', 'cleric', 3),
+    ('wohlwollen', 'cleric', 3), ('wort der zerstörung', 'cleric', 3), ('yustiels licht', 'cleric', 3),
+    ('zorn der erde', 'cleric', 3), ('zornaufbaugeschwindigkeit reduzieren', 'cleric', 3),
+    ('zustand umkehren', 'cleric', 3), ('zügelung', 'cleric', 3),
 
-    # Kantor (Chanter) - confirmed: Gesang der Inspiration, Gesang der Absorbtion,
-    # Segen des Windes, Beschwoerungsformel; + aus echtem Log dieses Servers. "Gesang"/"Lied"
-    # sind bewusst hoch gewichtet, da das Gesangs-Thema Kantor-exklusiv ist (Kleriker hat das nicht).
-    ('gesang der inspiration', 'chanter', 3), ('gesang der absorb', 'chanter', 3),
-    ('segen des windes', 'chanter', 3), ('beschwörungsformel', 'chanter', 3),
-    ('ausdauerabsorption', 'chanter', 3), ('gesang', 'chanter', 3), (' lied', 'chanter', 3),
+    # Kantor (53)
+    ('abstumpfender hieb', 'chanter', 3), ('aufwachen', 'chanter', 3), ('ausdauer-strahlung', 'chanter', 3),
+    ('ausdauerabsorption', 'chanter', 3), ('bergrutsch', 'chanter', 3), ('beschwörungsformel', 'chanter', 3),
+    ('beschwörungsformel der inspiration', 'chanter', 3), ('blitzschlag', 'chanter', 3),
+    ('desorientierender hieb', 'chanter', 3), ('elementare abschirmung', 'chanter', 3),
+    ('flug: mantra-reichweite erhöhen', 'chanter', 3), ('flug: segen des verstärkungsgottes', 'chanter', 3),
+    ('gefangennahme', 'chanter', 3), ('gesang der absorb', 'chanter', 3), ('gesang der inspiration', 'chanter', 3),
+    ('geschwindigkeitsmantra', 'chanter', 3), ('glühender hieb', 'chanter', 3), ('heilschub', 'chanter', 3),
+    ('heilverbindung', 'chanter', 3), ('mantra-reichweite erhöhen', 'chanter', 3),
+    ('marchutans schutz', 'chanter', 3), ('meteor-hieb', 'chanter', 3), ('pentagramm-schock', 'chanter', 3),
+    ('perfektes parieren', 'chanter', 3), ('physischer angriff erhöhen', 'chanter', 3),
+    ('rasende ermutigung', 'chanter', 3), ('raum-zeit-flucht', 'chanter', 3), ('resonanztrübung', 'chanter', 3),
+    ('riposte', 'chanter', 3), ('rückkopplung', 'chanter', 3), ('schall-schwung', 'chanter', 3),
+    ('schildmantra', 'chanter', 3), ('schlag der vehemenz', 'chanter', 3), ('schutz des felsens', 'chanter', 3),
+    ('seelenschloss', 'chanter', 3), ('segen des felsens', 'chanter', 3), ('segen des windes', 'chanter', 3),
+    ('seismischer bodendruck', 'chanter', 3), ('sicherer schutzbereich', 'chanter', 3),
+    ('spaltschlag', 'chanter', 3), ('spritzender schwung', 'chanter', 3), ('tödlicher hieb', 'chanter', 3),
+    ('unbesiegbarkeitsmantra', 'chanter', 3), ('vernichtungsfeuer', 'chanter', 3),
+    ('versprechen der erde', 'chanter', 3), ('wiederhergestellte ausdauer', 'chanter', 3),
+    ('wiederherstellungszauber', 'chanter', 3), ('wiederholtes zerschmettern', 'chanter', 3),
+    ('zauber der flinkheit', 'chanter', 3), ('zauber des durchbruchs', 'chanter', 3),
+    ('zauber des lebens', 'chanter', 3), ('zauber des schutzes', 'chanter', 3),
+    ('zauberformel des sturms', 'chanter', 3),
 
-    # Gladiator - "Klinge der Provokation"/"Fluegelklinge"/"Klingenwirbel" waren hier eingetragen,
-    # nachdem ein Gladiator faelschlich als Templer erkannt wurde; das duerfte aber denselben Fehler
-    # wie bei Kleriker/Kantor gewesen sein - vermutlich geteilte Krieger-Basis-Skills (Provozieren ist
-    # eine Tank-Mechanik, passt thematisch auch zum Templer), bestaetigt durch einen neuen Bugreport
-    # (Templer faelschlich als Gladiator erkannt). Deshalb wieder entfernt statt weiter zu raten.
-    # Nur noch aus echtem Log dieses Servers, unverifiziert ob wirklich Gladiator-exklusiv:
-    ('glänzender schnitt', 'gladiator', 2), ('schnitt des blutschwerts', 'gladiator', 2),
-    ('blutschwert', 'gladiator', 1), ('verwüstung', 'gladiator', 1), ('berserker', 'gladiator', 1),
-    ('zorniger', 'gladiator', 1), ('robuster', 'gladiator', 1),
+    # Gladiator (53)
+    ('blutsaugender schlag', 'gladiator', 3), ('blutsaugendes schwert', 'gladiator', 3),
+    ('druckwelle', 'gladiator', 3), ('durchdringendes zerreißen', 'gladiator', 3),
+    ('energie-explosion', 'gladiator', 3), ('erbebenwelle', 'gladiator', 3), ('erdbebenwelle', 'gladiator', 3),
+    ('explosion der wut', 'gladiator', 3), ('explosion des zorns', 'gladiator', 3),
+    ('flug: phys. angriff erhöhen', 'gladiator', 3), ('flug: segen des schwertgottes', 'gladiator', 3),
+    ('flügel stärken', 'gladiator', 3), ('flügelklinge', 'gladiator', 3),
+    ('fortgeschrittene stangenwaffe', 'gladiator', 3), ('fortgeschrittene stangewaffe', 'gladiator', 3),
+    ('gefängnis', 'gladiator', 3), ('geheul', 'gladiator', 3), ('glänzender schnitt', 'gladiator', 3),
+    ('kampfvorbereitung', 'gladiator', 3), ('knöchel-verlangsamung', 'gladiator', 3),
+    ('konter der absorption', 'gladiator', 3), ('konzentriertes blocken', 'gladiator', 3),
+    ('kraftreserve', 'gladiator', 3), ('körperhieb', 'gladiator', 3), ('luftgefängnis', 'gladiator', 3),
+    ('niederwerfen erhöhen', 'gladiator', 3), ('rasender hieb', 'gladiator', 3),
+    ('rüstung der rache', 'gladiator', 3), ('scharfer schlag', 'gladiator', 3),
+    ('schnitt des blutschwerts', 'gladiator', 3), ('schwerer zertrümmerungsschlag', 'gladiator', 3),
+    ('schwächender schlag', 'gladiator', 3), ('sehnenzerstückler', 'gladiator', 3),
+    ('seismische woge', 'gladiator', 3), ('sicherer schlag', 'gladiator', 3), ('sprungschlitzer', 'gladiator', 3),
+    ('sturmhaltung', 'gladiator', 3), ('tanzende flammenklinge', 'gladiator', 3),
+    ('technischer konter', 'gladiator', 3), ('todestreffer', 'gladiator', 3),
+    ('unerschrockener geist', 'gladiator', 3), ('verkrüppelnder schnitt', 'gladiator', 3),
+    ('verteidigungsvorbereitung', 'gladiator', 3), ('welle der erschöpfung', 'gladiator', 3),
+    ('welle der regeneration', 'gladiator', 3), ('welle des zorns', 'gladiator', 3),
+    ('wiederholter klingenwirbel', 'gladiator', 3), ('wiederholter körperschlag', 'gladiator', 3),
+    ('wirbelnder schlag', 'gladiator', 3), ('wutabsorption', 'gladiator', 3), ('zauberabwehr', 'gladiator', 3),
+    ('zerschmetternder schlag', 'gladiator', 3), ('zorniger schlag', 'gladiator', 3),
 
-    # Assassine - aus echtem Log dieses Servers + allgemein bekannte Themen (Tarnung/Gift/Meucheln)
-    ('schnelle klinge', 'assassin', 3), ('seelenschnitt', 'assassin', 3),
-    ('tarnung', 'assassin', 2), ('meucheln', 'assassin', 2), ('gift', 'assassin', 1),
+    # Assassine (52)
+    ('angriff aus dem hinterhalt', 'assassin', 3), ('attacke aus dem hinterhalt', 'assassin', 3),
+    ('attentat', 'assassin', 3), ('auge des zorns', 'assassin', 3), ('ausweichrate erhöhen', 'assassin', 3),
+    ('beschleunigter untergang', 'assassin', 3), ('blendende explosion', 'assassin', 3),
+    ('blitzschnell', 'assassin', 3), ('blitzschneller angriff', 'assassin', 3),
+    ('brüllen der bestie', 'assassin', 3), ('eid der präzision', 'assassin', 3), ('fluchthaltung', 'assassin', 3),
+    ('flug: krit. trefferrate erhöhen', 'assassin', 3), ('flug: segen des mordgottes', 'assassin', 3),
+    ('giftangriff', 'assassin', 3), ('himmelsklinge', 'assassin', 3), ('hinterhalt', 'assassin', 3),
+    ('ketten-siegelgravur', 'assassin', 3), ('kettenvernichtung', 'assassin', 3), ('kreuzschnitt', 'assassin', 3),
+    ('krit. trefferchance erhöhen', 'assassin', 3), ('magiewiderstand erhöhen', 'assassin', 3),
+    ('massaker', 'assassin', 3), ('reißerklauenschlag', 'assassin', 3), ('schattenfall', 'assassin', 3),
+    ('schattenillusion', 'assassin', 3), ('schattenschritt', 'assassin', 3), ('schlag der bestie', 'assassin', 3),
+    ('schnelle klinge', 'assassin', 3), ('schneller vertrag', 'assassin', 3), ('seelenschnitt', 'assassin', 3),
+    ('siegel-explosion', 'assassin', 3), ('siegel-klinge', 'assassin', 3), ('siegel-schweigen', 'assassin', 3),
+    ('siegelangriff', 'assassin', 3), ('siegelgravur', 'assassin', 3), ('sinnesverstärkung', 'assassin', 3),
+    ('spiralschnitt', 'assassin', 3), ('sprengpulveranwendung', 'assassin', 3), ('sprintangriff', 'assassin', 3),
+    ('sprung der bestie', 'assassin', 3), ('tritt der bestie', 'assassin', 3), ('tödlicher fokus', 'assassin', 3),
+    ('tödliches gift auftragen', 'assassin', 3), ('vertrag des ausweichens', 'assassin', 3),
+    ('verwandlung: schlächter', 'assassin', 3), ('wiederholte siegel-explosion', 'assassin', 3),
+    ('windschritt', 'assassin', 3), ('wirbelwindschnitt', 'assassin', 3),
+    ('überfall aus dem hinterhalt', 'assassin', 3), ('überfall-schlag', 'assassin', 3),
+    ('überraschungsangriff', 'assassin', 3),
 
-    # Templer - nur confirmed: Schildschlag. Die zuvor hier stehenden unbestaetigten Rateeintraege
-    # (rüstungsbrecher/trutz) sind entfernt - siehe Begruendung unten.
-    ('schildschlag', 'templar', 3),
+    # Templer (47)
+    ('barbarischer hieb', 'templar', 3), ('bestrafende welle', 'templar', 3), ('bestrafung', 'templar', 3),
+    ('blocken erhöhen', 'templar', 3), ('eisenhaut', 'templar', 3), ('empyrianische vorsehung', 'templar', 3),
+    ('empörung', 'templar', 3), ('entkräftender schwerer hieb', 'templar', 3), ('fangender schlag', 'templar', 3),
+    ('festnahme', 'templar', 3), ('flug: phys. verteidigung erhöhen', 'templar', 3),
+    ('flug: segen des wächter-generals', 'templar', 3), ('gedankenzerstörung', 'templar', 3),
+    ('gefangenschaft', 'templar', 3), ('große gesundheit', 'templar', 3), ('heiliger schild', 'templar', 3),
+    ('illusionsketten', 'templar', 3), ('kameradenschutz', 'templar', 3), ('kraft brechen', 'templar', 3),
+    ('magischer schmetterschlag', 'templar', 3), ('nezekans schild', 'templar', 3),
+    ('rüstung des empyrian. gebieters', 'templar', 3), ('rüstung des schutzes', 'templar', 3),
+    ('schild der geschwindigkeit', 'templar', 3), ('schild des mutes', 'templar', 3),
+    ('schildansturm', 'templar', 3), ('schildkonter', 'templar', 3), ('schildschlag', 'templar', 3),
+    ('schildsprengung', 'templar', 3), ('schildstoß', 'templar', 3), ('schlag der beseitigung', 'templar', 3),
+    ('schlag der züchtigung', 'templar', 3), ('schlag des inquisitors', 'templar', 3),
+    ('schutzpanzer', 'templar', 3), ('schwertwind', 'templar', 3), ('siegel des schutzes', 'templar', 3),
+    ('spottendes brüllen', 'templar', 3), ('stabiler schild', 'templar', 3), ('stahlbarrikade', 'templar', 3),
+    ('tp erhöhen', 'templar', 3), ('wiederholter hieb', 'templar', 3), ('wiederholter schildschlag', 'templar', 3),
+    ('wut der zerstörung', 'templar', 3), ('wut hervorrufen', 'templar', 3),
+    ('zornaufbaugeschwindigkeit erhöhen', 'templar', 3), ('zornesschlag', 'templar', 3),
+    ('äther-rüstung', 'templar', 3),
 
-    # Magier/Zauberer (Sorcerer) und Geisterbeschwoerer (Spiritmaster): absichtlich KEINE Eintraege.
-    # Es gab hier nur unbestaetigte Rateeintraege (Feuerball/Frostspeer/etc., "geist der/des") ohne
-    # echte Quelle - genau solche Eintraege haben bereits zweimal zu Fehlzuordnungen gefuehrt
-    # (Klinge der Provokation -> faelschlich Templer; ein Kleriker -> faelschlich Zauberer, vermutlich
-    # weil ein echter Kleriker-Skill zufaellig eines dieser geratenen Stichwoerter enthielt). Bis es
-    # echte bestaetigte Skillnamen fuer diese beiden Klassen gibt, bleiben sie bewusst ohne Hinweise -
-    # lieber ehrlich "Unbekannt" (manuell im Optionsfenster korrigierbar) als eine geratene Falschzuordnung.
+    # Magier/Zauberer (50)
+    ('abkühlung', 'sorcerer', 3), ('arkaner donnerschlag', 'sorcerer', 3), ('beschwörung: fels', 'sorcerer', 3),
+    ('blinder sprung', 'sorcerer', 3), ('eisharpune', 'sorcerer', 3), ('elementar-schutzbereich', 'sorcerer', 3),
+    ('feuer der magischen kraft', 'sorcerer', 3), ('feuerschuss', 'sorcerer', 3),
+    ('flammenangriff', 'sorcerer', 3), ('flammenharpune', 'sorcerer', 3), ('flammenkäfig', 'sorcerer', 3),
+    ('flammenschmelze', 'sorcerer', 3), ('flammenwalze', 'sorcerer', 3), ('fluch der schwäche', 'sorcerer', 3),
+    ('fluch: baum', 'sorcerer', 3), ('flug: magischen angriff erhöhen', 'sorcerer', 3),
+    ('flug: segen des zauberergottes', 'sorcerer', 3), ('frost', 'sorcerer', 3), ('frostsäule', 'sorcerer', 3),
+    ('funkelnde scherbe', 'sorcerer', 3), ('gabe der eisengewandung', 'sorcerer', 3),
+    ('gabe der flinkheit', 'sorcerer', 3), ('gefrierschock', 'sorcerer', 3), ('gletscherscherbe', 'sorcerer', 3),
+    ('glut', 'sorcerer', 3), ('großer vulkanausbruch', 'sorcerer', 3), ('illusion des winters', 'sorcerer', 3),
+    ('illusionssturm', 'sorcerer', 3), ('illusionstor', 'sorcerer', 3), ('kalte luft beschwören', 'sorcerer', 3),
+    ('lebenskraft tauschen', 'sorcerer', 3), ('lumiels zorn', 'sorcerer', 3), ('magieexplosion', 'sorcerer', 3),
+    ('magischen angriff erhöhen', 'sorcerer', 3), ('maximale mp erhöhen', 'sorcerer', 3),
+    ('robe der flamme', 'sorcerer', 3), ('schlaf: vogelscheuche', 'sorcerer', 3), ('schlafsturm', 'sorcerer', 3),
+    ('schlafwolke', 'sorcerer', 3), ('schlag des sturms', 'sorcerer', 3), ('schneidender wind', 'sorcerer', 3),
+    ('seelenabsorption', 'sorcerer', 3), ('seelenfrost', 'sorcerer', 3), ('speer des windes', 'sorcerer', 3),
+    ('vaizels weisheit', 'sorcerer', 3), ('verfluchter alter baum', 'sorcerer', 3),
+    ('winterbindung', 'sorcerer', 3), ('winterrüstung', 'sorcerer', 3), ('wirbelwind beschwören', 'sorcerer', 3),
+    ('äthergriff', 'sorcerer', 3),
+
+    # Geisterbeschwoerer (62)
+    ('abzeichen des versteckens', 'spiritmaster', 3), ('albtraumfessel', 'spiritmaster', 3),
+    ('befehl: explosionsklaue', 'spiritmaster', 3), ('befehl: groll', 'spiritmaster', 3),
+    ('befehl: mauer des schutzes', 'spiritmaster', 3), ('befehl: ruinöser angriff', 'spiritmaster', 3),
+    ('befehl: schutz', 'spiritmaster', 3), ('befehl: schützender geist', 'spiritmaster', 3),
+    ('befehl: sturm der elemente', 'spiritmaster', 3), ('befehl: störung', 'spiritmaster', 3),
+    ('befehl: zu asche verbrennen', 'spiritmaster', 3), ('beschwörung: erdgeist', 'spiritmaster', 3),
+    ('beschwörung: feuergeist', 'spiritmaster', 3), ('beschwörung: gruppenmitglied', 'spiritmaster', 3),
+    ('beschwörung: magmageist', 'spiritmaster', 3), ('beschwörung: sturmgeist', 'spiritmaster', 3),
+    ('beschwörung: wassergeist', 'spiritmaster', 3), ('beschwörung: winddiener', 'spiritmaster', 3),
+    ('beschwörung: windgeist', 'spiritmaster', 3), ('beschwörung: zyklon-diener', 'spiritmaster', 3),
+    ('elementarauffrischung', 'spiritmaster', 3), ('elementarschlag', 'spiritmaster', 3),
+    ('entkräftendes festhalten', 'spiritmaster', 3), ('entzauberung', 'spiritmaster', 3),
+    ('erstickungssog', 'spiritmaster', 3), ('flammen der pein', 'spiritmaster', 3),
+    ('fluch der magischen kraft', 'spiritmaster', 3), ('fluch: feuergeist', 'spiritmaster', 3),
+    ('fluch: wassergeist', 'spiritmaster', 3), ('fluchwolke', 'spiritmaster', 3),
+    ('flug: mp erhöhen', 'spiritmaster', 3), ('flug: segen des geistgottes', 'spiritmaster', 3),
+    ('furcht', 'spiritmaster', 3), ('furcht: ginseng', 'spiritmaster', 3), ('geist schwächen', 'spiritmaster', 3),
+    ('geistheilung', 'spiritmaster', 3), ('grausige düsternis', 'spiritmaster', 3),
+    ('höllenfäulnis', 'spiritmaster', 3), ('höllenqualen', 'spiritmaster', 3),
+    ('kette der erde', 'spiritmaster', 3), ('konzentration', 'spiritmaster', 3),
+    ('magie auflösen', 'spiritmaster', 3), ('magieblock', 'spiritmaster', 3),
+    ('magieverbrennung', 'spiritmaster', 3), ('magische umkehr', 'spiritmaster', 3),
+    ('mana-explosion', 'spiritmaster', 3), ('mudra der unterwerfung', 'spiritmaster', 3),
+    ('rauchgasexplosion', 'spiritmaster', 3), ('rüstung des geistes', 'spiritmaster', 3),
+    ('schutz der erde', 'spiritmaster', 3), ('schwächende magie verstärken', 'spiritmaster', 3),
+    ('seelenflut', 'spiritmaster', 3), ('seelisches mitgefühl', 'spiritmaster', 3),
+    ('steinschock', 'spiritmaster', 3), ('stigma der macht', 'spiritmaster', 3),
+    ('stärkender geist: rüstung des elementes', 'spiritmaster', 3),
+    ('stärkender geist: verzauberte rüstung', 'spiritmaster', 3), ('umfangreiche erosion', 'spiritmaster', 3),
+    ('vertrag der resistenz', 'spiritmaster', 3), ('zorn der wildnis', 'spiritmaster', 3),
+    ('zorntausch', 'spiritmaster', 3), ('zyklon des zorns', 'spiritmaster', 3),
 ]
 
 
