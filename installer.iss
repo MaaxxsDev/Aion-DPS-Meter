@@ -1,7 +1,7 @@
 [Setup]
 AppId={{9F3E2C7A-5B4D-4A1E-9C8F-1D2E3F4A5B6C}
 AppName=Aion DPS Meter
-AppVersion=1.3.0
+AppVersion=1.4.0
 AppPublisher=OriginAion Community
 DefaultDirName={autopf}\AionDPSMeter
 DefaultGroupName=Aion DPS Meter

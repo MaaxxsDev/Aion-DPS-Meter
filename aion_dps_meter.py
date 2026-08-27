@@ -15,7 +15,7 @@ from tkinter import filedialog
 import customtkinter as ctk
 from PIL import Image, ImageDraw, ImageTk
 
-APP_VERSION = '1.3.0'
+APP_VERSION = '1.4.0'
 GITHUB_REPO = 'MaaxxsDev/Aion-DPS-Meter'
 GITHUB_API_LATEST = f'https://api.github.com/repos/{GITHUB_REPO}/releases/latest'
 
@@ -214,7 +214,7 @@ class Settings:
             folder = f'AionDPSMeter_{safe}'
         self.settings_file = os.path.join(user_data_dir(folder), 'settings.json')
         self.data = {'log_path': DEFAULT_LOG_PATH, 'character_name': '', 'language': 'de',
-                     'dual_account_mode': False, 'classes': {}}
+                     'dual_account_mode': False, 'hide_npcs': False, 'classes': {}}
         try:
             with open(self.settings_file, 'r', encoding='utf-8') as f:
                 loaded = json.load(f)
@@ -249,6 +249,10 @@ class Settings:
     def dual_account_mode(self):
         return bool(self.data.get('dual_account_mode', False))
 
+    @property
+    def hide_npcs(self):
+        return bool(self.data.get('hide_npcs', False))
+
     def set_log_path(self, path):
         self.data['log_path'] = path or DEFAULT_LOG_PATH
         self._save()
@@ -263,6 +267,10 @@ class Settings:
 
     def set_dual_account_mode(self, enabled):
         self.data['dual_account_mode'] = bool(enabled)
+        self._save()
+
+    def set_hide_npcs(self, enabled):
+        self.data['hide_npcs'] = bool(enabled)
         self._save()
 
     def get_class(self, name):
@@ -337,6 +345,7 @@ STRINGS = {
         'total_all_monsters': 'Gesamt (alle Monster)',
         'copy_total_fallback': 'Gesamt',
         'target_label': 'Ziel:',
+        'hide_npcs_label': 'Nur Spieler anzeigen',
         'lines_processed': 'Zeilen verarbeitet: {n}',
         'copy_row': 'Zeile kopieren',
         'no_data_view': 'Keine Daten in dieser Ansicht',
@@ -399,6 +408,7 @@ STRINGS = {
         'total_all_monsters': 'Total (all monsters)',
         'copy_total_fallback': 'Total',
         'target_label': 'Target:',
+        'hide_npcs_label': 'Show players only',
         'lines_processed': 'Lines processed: {n}',
         'copy_row': 'Copy row',
         'no_data_view': 'No data in this view',
@@ -900,6 +910,51 @@ def resolve_item_name(item_id):
     if item_id in BULK_ITEM_NAMES:
         return BULK_ITEM_NAMES[item_id], 'bulk'
     return f'Item #{item_id}', 'id'
+
+
+# Item quality/rarity, driving the color an item's name is rendered in on the Loottable. Same
+# source/pipeline as the name table above (item_quality.json, ~91.7k entries), but simpler to
+# build - `quality` is a plain enum attribute directly on each item_templates.xml <item_template>,
+# no client string-table join needed since it isn't localized text.
+# The emulator source itself defines 7 tiers (JUNK/COMMON/RARE/LEGEND/UNIQUE/EPIC/MYTHIC), but the
+# user only named 5 distinct in-game colors from actually playing OriginAion (weiss/gruen/blau/
+# gold/mythisch) - JUNK is folded into COMMON's color and EPIC into UNIQUE's, both unconfirmed
+# guesses since neither tier was named. The exact hex shades are also unverified - unlike item
+# names, colors can't be cross-checked against the client's own text data (see
+# aion_item_loot_database memory), so this is a best-effort default. If the user reports a wrong
+# color for a specific item, pin it in CONFIRMED_ITEM_QUALITY below - same pattern as
+# CONFIRMED_ITEM_NAMES.
+CONFIRMED_ITEM_QUALITY = {}
+
+QUALITY_COLORS = {
+    'JUNK': '#e8e8e8',
+    'COMMON': '#e8e8e8',
+    'RARE': '#2ecc71',
+    'LEGEND': '#3b9eff',
+    'UNIQUE': '#ffc94d',
+    'EPIC': '#ffc94d',
+    'MYTHIC': '#ff4d6d',
+}
+DEFAULT_ITEM_COLOR = QUALITY_COLORS['COMMON']
+
+
+def _load_bulk_item_quality():
+    try:
+        with open(resource_path('item_quality.json'), 'r', encoding='utf-8') as f:
+            raw = json.load(f)
+        return {int(k): v for k, v in raw.items()}
+    except Exception:
+        return {}
+
+
+BULK_ITEM_QUALITY = _load_bulk_item_quality()
+
+
+def resolve_item_color(item_id):
+    """Hex color to render an item's name in, based on its rarity tier. Falls back to the common/
+    white color for anything not in the bulk table (e.g. a custom OriginAion-only item ID)."""
+    quality = CONFIRMED_ITEM_QUALITY.get(item_id) or BULK_ITEM_QUALITY.get(item_id)
+    return QUALITY_COLORS.get(quality, DEFAULT_ITEM_COLOR)
 
 
 # --- Deutsch --------------------------------------------------------------
@@ -1680,54 +1735,102 @@ class MeterList:
 
 
 class LootList:
-    """Chronological feed (oldest on top, newest at the bottom - like a chat log), not a sortable
-    table. Rows are created once per (looter, item_id) key and updated/repositioned in place on
-    later calls rather than destroyed and rebuilt - render() used to wipe and recreate every
-    widget on every 400ms refresh tick, which is what caused the flicker. Auto-scrolls to the
-    bottom, but only when something actually changed, so it doesn't fight a manual scroll-up
-    during a quiet moment with no new loot."""
+    """Feed-style table, chronological by default (oldest on top, newest at the bottom - like a
+    chat log) but can be switched to alphabetical-by-player via clicking the "Spieler" header.
+    Rows are created once per (looter, item_id) key and updated/repositioned in place on later
+    calls rather than destroyed and rebuilt - render() used to wipe and recreate every widget on
+    every 400ms refresh tick, which is what caused the flicker. Auto-scrolls to the bottom in
+    chronological mode, but only when something actually changed, so it doesn't fight a manual
+    scroll-up during a quiet moment with no new loot; player-sort mode never auto-scrolls, since
+    the point there is to browse a static grouping rather than follow a live feed."""
+
+    # Approximate width of CTkScrollableFrame's own scrollbar gutter, reserved as a dead column at
+    # the right edge of the (separate, non-scrolling) header row so its 3 columns still line up
+    # with the scroll frame's slightly narrower content area below. Not pixel-exact (the real
+    # scrollbar only ever appears/reserves space once content overflows), but close enough that the
+    # header stays visually aligned either way.
+    SCROLLBAR_GUTTER_PX = 16
 
     def __init__(self, parent, fonts):
         self.fonts = fonts
-        self.scroll = ctk.CTkScrollableFrame(parent, fg_color=COL_SURFACE, corner_radius=12,
+        # Header lives in its own non-scrolling frame stacked above the scroll area (instead of
+        # being row 0 *inside* the CTkScrollableFrame, as it used to be) so it stays put ("fixed")
+        # once there's enough loot that the row list actually scrolls.
+        self.container = ctk.CTkFrame(parent, fg_color=COL_SURFACE, corner_radius=12)
+        self.header = ctk.CTkFrame(self.container, fg_color='transparent')
+        self.header.pack(fill='x', side='top')
+        for col, weight in ((0, 2), (1, 3), (2, 1)):
+            self.header.columnconfigure(col, weight=weight)
+        self.header.columnconfigure(3, minsize=self.SCROLLBAR_GUTTER_PX, weight=0)
+
+        self.scroll = ctk.CTkScrollableFrame(self.container, fg_color=COL_SURFACE, corner_radius=0,
                                               scrollbar_fg_color=COL_SURFACE,
                                               scrollbar_button_color=COL_TRACK_HOVER,
                                               scrollbar_button_hover_color=COL_ACCENT)
+        self.scroll.pack(fill='both', expand=True, side='top')
         self.scroll.columnconfigure(0, weight=2)
         self.scroll.columnconfigure(1, weight=3)
         self.scroll.columnconfigure(2, weight=1)
         self.rows = {}  # (looter, item_id) -> (name_lbl, item_lbl, qty_lbl)
+        self._last_entries = []
         self._last_rendered = None
+        self.sort_mode = 'chrono'  # or 'player'
         self.empty_label = ctk.CTkLabel(self.scroll, text=tr('no_data_view'),
                                          text_color=COL_INK_MUTED, font=fonts['sub'])
         self._build_header()
 
     def pack(self, **kw):
-        self.scroll.pack(**kw)
+        self.container.pack(**kw)
 
     def _build_header(self):
-        pad = {'padx': 12, 'pady': (8, 4)}
-        headers = [(tr('loot_col_player'), 'w'), (tr('loot_col_item'), 'w'), (tr('loot_col_qty'), 'e')]
-        for col, (text, anchor) in enumerate(headers):
-            ctk.CTkLabel(self.scroll, text=text, font=self.fonts['sub'], text_color=COL_INK_MUTED,
+        pad = {'padx': 12, 'pady': (8, 8)}
+        self.player_header = ctk.CTkLabel(self.header, font=self.fonts['sub'], text_color=COL_INK_MUTED,
+                                           anchor='w', cursor='hand2')
+        self.player_header.grid(row=0, column=0, sticky='ew', **pad)
+        self.player_header.bind('<Button-1>', self._toggle_sort)
+        self._update_player_header()
+        headers = [(tr('loot_col_item'), 'w'), (tr('loot_col_qty'), 'e')]
+        for col, (text, anchor) in enumerate(headers, start=1):
+            ctk.CTkLabel(self.header, text=text, font=self.fonts['sub'], text_color=COL_INK_MUTED,
                          anchor=anchor).grid(row=0, column=col, sticky='ew', **pad)
 
+    def _update_player_header(self):
+        # A single faint '↕' read as "kaum erkennbar" (barely visible) against the dark background -
+        # two solid, high-contrast triangles read as an obvious "sortable column" affordance even
+        # inactive, and a single accent-colored one makes the active direction unambiguous.
+        if self.sort_mode == 'player':
+            text, color = f"{tr('loot_col_player')}  ▲", COL_ACCENT
+        else:
+            text, color = f"{tr('loot_col_player')}  ▲▼", COL_INK_MUTED
+        self.player_header.configure(text=text, text_color=color)
+
+    def _toggle_sort(self, event=None):
+        self.sort_mode = 'player' if self.sort_mode == 'chrono' else 'chrono'
+        self._update_player_header()
+        self.render(self._last_entries)
+
     def render(self, entries):
-        """entries: ordered list (oldest first, newest last) of (key, player, item, qty, source),
-        source being 'confirmed'/'bulk'/'id' from resolve_item_name() - 'bulk' names are
-        best-effort and get a trailing "*" since they can be confidently wrong for a
-        server-repurposed item ID."""
-        changed = entries != self._last_rendered
-        self._last_rendered = entries
+        """entries: unsorted list of (key, player, item, qty, source, last_t, color), source being
+        'confirmed'/'bulk'/'id' from resolve_item_name() - 'bulk' names are best-effort and get a
+        trailing "*" since they can be confidently wrong for a server-repurposed item ID. color is
+        the rarity-tier hex from resolve_item_color(), applied to the item name text."""
+        self._last_entries = entries
+        if self.sort_mode == 'player':
+            ordered = sorted(entries, key=lambda e: (e[1].lower(), e[5]))
+        else:
+            ordered = sorted(entries, key=lambda e: e[5])
+
+        changed = ordered != self._last_rendered
+        self._last_rendered = ordered
         pad = {'padx': 12, 'pady': 3}
         seen = set()
-        for i, (key, player, item, qty, source) in enumerate(entries, start=1):
+        for i, (key, player, item, qty, source, last_t, color) in enumerate(ordered):
             seen.add(key)
             item_text = f'{item} *' if source == 'bulk' else item
             if key in self.rows:
                 name_lbl, item_lbl, qty_lbl = self.rows[key]
                 name_lbl.configure(text=player)
-                item_lbl.configure(text=item_text)
+                item_lbl.configure(text=item_text, text_color=color)
                 qty_lbl.configure(text=fmt_num(qty))
                 for w in (name_lbl, item_lbl, qty_lbl):
                     w.grid_configure(row=i)
@@ -1735,7 +1838,7 @@ class LootList:
                 name_lbl = ctk.CTkLabel(self.scroll, text=player, font=self.fonts['ui'],
                                          text_color=COL_INK_PRIMARY, anchor='w')
                 item_lbl = ctk.CTkLabel(self.scroll, text=item_text, font=self.fonts['ui'],
-                                         text_color=COL_INK_SECONDARY, anchor='w')
+                                         text_color=color, anchor='w')
                 qty_lbl = ctk.CTkLabel(self.scroll, text=fmt_num(qty), font=self.fonts['ui'],
                                         text_color=COL_INK_PRIMARY, anchor='e')
                 name_lbl.grid(row=i, column=0, sticky='ew', **pad)
@@ -1750,11 +1853,11 @@ class LootList:
             del self.rows[k]
 
         if not entries:
-            self.empty_label.grid(row=1, column=0, columnspan=3, pady=20)
+            self.empty_label.grid(row=0, column=0, columnspan=3, pady=20)
             return
         self.empty_label.grid_forget()
 
-        if changed:
+        if changed and self.sort_mode == 'chrono':
             self.scroll.update_idletasks()
             self.scroll._parent_canvas.yview_moveto(1.0)
 
@@ -2111,8 +2214,16 @@ class MeterApp:
         self.tabview.add(self.tab_loot_name)
 
         dmg_tab = self.tabview.tab(self.tab_damage_name)
-        self.monster_dropdown = MonsterDropdown(dmg_tab, self.fonts, on_select=self.on_target_select)
-        self.monster_dropdown.pack(fill='x', padx=2, pady=(0, 8))
+        filter_row = ctk.CTkFrame(dmg_tab, fg_color='transparent')
+        filter_row.pack(fill='x', padx=2, pady=(0, 8))
+        self.monster_dropdown = MonsterDropdown(filter_row, self.fonts, on_select=self.on_target_select)
+        self.monster_dropdown.pack(side='left')
+        self.hide_npcs_var = tk.BooleanVar(value=self.settings.hide_npcs)
+        ctk.CTkCheckBox(filter_row, text=tr('hide_npcs_label'), font=self.fonts['ui'],
+                         text_color=COL_INK_SECONDARY, fg_color=COL_ACCENT, hover_color=COL_ACCENT,
+                         variable=self.hide_npcs_var,
+                         command=lambda: self.settings.set_hide_npcs(self.hide_npcs_var.get())
+                         ).pack(side='right', padx=(8, 4))
         self.dmg_list = MeterList(dmg_tab, self.fonts, self._resolve_class, self.icon_photos)
         self.dmg_list.pack(fill='both', expand=True, padx=2, pady=2)
 
@@ -2285,6 +2396,15 @@ class MeterApp:
                      row['damage'] / mdur if mdur else 0, is_self_key(name))
                     for name, row in rows.items()
                 ]
+        if self.settings.hide_npcs:
+            # summary['overall']/rows are already restricted to attackers reachable from 'Du'
+            # through the players/monsters closure in Encounter.summarize() - but that closure is
+            # name-based (mob species, not per-instance IDs), so unrelated NPC-vs-NPC combat
+            # visible nearby (e.g. Abyss siege fights) can occasionally bridge into it. Requiring
+            # a resolved class (manual or guessed) is a second, independent signal - real players
+            # eventually use a recognizable class skill, monsters never do - so this catches what
+            # the closure alone can't. 'Du' is always exempt so the user never loses their own row.
+            items = [it for it in items if it[6] or self._resolve_class(it[0]) != 'unknown']
         items.sort(key=lambda it: -it[2])
         self.dmg_list.render(items, tr('unit_damage'), 'DPS')
 
@@ -2302,18 +2422,17 @@ class MeterApp:
     def render_loot(self):
         # Loot lives on the running Gesamt-Sitzung itself, not the encounter dropdown selection -
         # it naturally clears together with it (manual Reset, group join, teleport, 10 min idle).
-        # Ordered oldest-first/newest-last (a feed, not an alphabetical table): a repeat pickup of
-        # the same (player, item) bumps its existing row back to the bottom instead of adding a
-        # duplicate, since last_t is what's actually sorted on.
+        # Ordering itself (chronological feed vs. alphabetical by player) is LootList's own call,
+        # toggled by clicking its "Spieler" header - hand it the raw, unsorted entries.
         entries = []
         for looter, items in self.manager.session.loot_totals.items():
             display = self._display_name(looter)
             for item_id, (qty, last_t) in items.items():
                 name, source = resolve_item_name(item_id)
+                color = resolve_item_color(item_id)
                 key = (looter, item_id)
-                entries.append((last_t, key, display, name, qty, source))
-        entries.sort(key=lambda e: e[0])
-        self.loot_list.render([e[1:] for e in entries])
+                entries.append((key, display, name, qty, source, last_t, color))
+        self.loot_list.render(entries)
 
 
 def main():
