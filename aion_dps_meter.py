@@ -18,7 +18,7 @@ from tkinter import filedialog
 import customtkinter as ctk
 from PIL import Image, ImageDraw, ImageTk
 
-APP_VERSION = '1.5.0'
+APP_VERSION = '1.5.1'
 GITHUB_REPO = 'MaaxxsDev/Aion-DPS-Meter'
 GITHUB_API_LATEST = f'https://api.github.com/repos/{GITHUB_REPO}/releases/latest'
 
@@ -932,16 +932,20 @@ def is_self_key(name):
 # Loot lines only ever carry a raw, unresolved item template ID (see LOOT_*_RE_DE/EN) - the name
 # has to be resolved separately. Two tiers:
 #  - CONFIRMED_ITEM_NAMES: hand-verified against this server's own client strings, one entry at a
-#    time as the user reports them (started from the Elim-Talisman II report). Always correct.
+#    time as the user reports them. Always correct - but ONLY when the report was actually
+#    double-checked against that specific item ID. The dict briefly had an ID 186000051 entry
+#    ("Glaenzender glorreicher Elim-Talisman II") that turned out to be a copy/paste of a random,
+#    unrelated Chat.log line rather than a real report for that ID - the bulk table's own name for
+#    it ("Maechtige uralte Krone") was correct all along. Removed rather than "fixed" with another
+#    manually-typed value, since there's no fresh confirmation to replace it with - it now
+#    correctly falls through to the bulk tier like any other not-specially-verified item. Repurposed
+#    IDs are still a real possibility on a private server in general (worth keeping this two-tier
+#    system for), just not something confirmed for any specific ID right now.
 #  - item_names.json (bundled resource): a ~78k-entry id->name table built the same way as the
 #    skill database (AionGermany/Aion-Lightning item_templates.xml `descr` codename joined against
-#    this client's own item string tables) - reliable for the vast majority of items, EXCEPT where
-#    OriginAion has repurposed a stock item ID for custom content, as confirmed for ID 186000051
-#    itself (stock: "Maechtige uralte Krone" / actually: "Glaenzender glorreicher Elim-Talisman
-#    II"). Shown but visibly marked as unverified, since it can be confidently wrong.
-CONFIRMED_ITEM_NAMES = {
-    186000051: 'Glänzender glorreicher Elim-Talisman II',
-}
+#    this client's own item string tables) - reliable for the vast majority of items, but shown
+#    marked as unverified (trailing '*'), since a private server could repurpose any given ID.
+CONFIRMED_ITEM_NAMES = {}
 
 
 def _load_bulk_item_names():
@@ -1016,10 +1020,9 @@ def resolve_item_color(item_id):
 # plain server-rendered HTML - confirmed by fetching one directly and cross-checking its stats
 # against item_templates.xml for the same ID (exact match: weapon damage, accuracy, parry, etc.),
 # meaning it's built from the same/an equivalent Aion-Lightning-family source. That also means the
-# SAME stock-vs-repurposed-ID caveat as BULK_ITEM_NAMES applies here - confirmed directly: item
-# 186000051 shows as "Major Ancient Crown" on Aion Codex, not OriginAion's actual "Elim-Talisman
-# II". Shown to the user as an explicit disclaimer in the popup itself (see aion_wiki_item_popup
-# memory), same as the '*' marker on bulk item names.
+# SAME stock-vs-repurposed-ID caveat as BULK_ITEM_NAMES applies here in general (a private server
+# could rename/repurpose any given ID) - shown to the user as an explicit disclaimer in the popup
+# itself (see aion_item_info_popup memory), same as the '*' marker on bulk item names.
 AION_CODEX_ITEM_URL = 'https://aioncodex.com/us/item/{id}/'
 ITEM_INFO_NAME_RE = re.compile(
     r'<span class="item_title item_grade_\d+" id="item_name"><b>(.*?)</b></span>')
@@ -1075,6 +1078,72 @@ def fetch_item_info(item_id):
 
     return {'name': name, 'stats': stats, 'detail_lines': detail_lines, 'price': price,
             'icon_bytes': icon_bytes, 'url': url}
+
+
+# Live auto-resolution for items missing from BOTH CONFIRMED_ITEM_NAMES and the bundled bulk table
+# (item_names.json covers ~86% of items - the rest, plus any genuinely OriginAion-only custom ID,
+# show as the raw "Item #12345" fallback). Fills those in automatically using the same Aion Codex
+# source as ItemInfoPopup, on a background thread so it never blocks rendering. Treated as the SAME
+# 'bulk' trust tier (shown with the identical '*' caveat) - never elevated to 'confirmed', since
+# Aion Codex is the same stock-data lineage as the bundled table and carries the identical
+# stock-vs-repurposed-ID risk (see aion_item_info_popup memory). Learned names persist across
+# restarts in a small writable cache file, shared across dual-account profiles - which item IDs
+# exist is a server-wide fact, not something that differs per account - so a given ID only ever
+# needs fetching once, not every session.
+_LIVE_NAME_CACHE_FILE = os.path.join(user_data_dir(), 'item_name_cache.json')
+_LIVE_NAME_LOCK = threading.Lock()
+_LIVE_NAME_CACHE = {}    # item_id -> resolved name, or None if a fetch was tried and failed
+_LIVE_NAME_INFLIGHT = set()
+
+
+def _load_live_name_cache():
+    try:
+        with open(_LIVE_NAME_CACHE_FILE, 'r', encoding='utf-8') as f:
+            raw = json.load(f)
+        return {int(k): v for k, v in raw.items()}
+    except Exception:
+        return {}
+
+
+def _save_live_name_cache():
+    try:
+        with open(_LIVE_NAME_CACHE_FILE, 'w', encoding='utf-8') as f:
+            json.dump({str(k): v for k, v in _LIVE_NAME_CACHE.items() if v is not None}, f,
+                      ensure_ascii=False)
+    except Exception:
+        pass
+
+
+_LIVE_NAME_CACHE.update(_load_live_name_cache())
+
+
+def _fetch_live_name_worker(item_id):
+    info = fetch_item_info(item_id)
+    name = info['name'] if info else None
+    with _LIVE_NAME_LOCK:
+        _LIVE_NAME_CACHE[item_id] = name
+        _LIVE_NAME_INFLIGHT.discard(item_id)
+        if name is not None:
+            _save_live_name_cache()
+
+
+def resolve_item_name_live(item_id):
+    """Like resolve_item_name(), but for the 'id' fallback case also checks/kicks off a background
+    Aion Codex lookup so a previously-unknown item fills itself in automatically on a later render.
+    Non-blocking - always returns immediately, same as resolve_item_name(); a fetch in progress (or
+    one that already failed once - never retried, to avoid hammering the site) just means this
+    keeps returning the '#id' fallback until a later render() picks up the now-cached result."""
+    name, source = resolve_item_name(item_id)
+    if source != 'id':
+        return name, source
+    with _LIVE_NAME_LOCK:
+        if item_id in _LIVE_NAME_CACHE:
+            cached = _LIVE_NAME_CACHE[item_id]
+            return (cached, 'bulk') if cached else (name, 'id')
+        if item_id not in _LIVE_NAME_INFLIGHT:
+            _LIVE_NAME_INFLIGHT.add(item_id)
+            threading.Thread(target=_fetch_live_name_worker, args=(item_id,), daemon=True).start()
+    return name, 'id'
 
 
 # --- Deutsch --------------------------------------------------------------
@@ -2843,7 +2912,7 @@ class MeterApp:
         for looter, items in self.manager.session.loot_totals.items():
             display = self._display_name(looter)
             for item_id, (qty, last_t) in items.items():
-                name, source = resolve_item_name(item_id)
+                name, source = resolve_item_name_live(item_id)
                 color = resolve_item_color(item_id)
                 key = (looter, item_id)
                 entries.append((key, display, name, qty, source, last_t, color))
