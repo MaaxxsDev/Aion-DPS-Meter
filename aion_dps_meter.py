@@ -15,18 +15,18 @@ from tkinter import filedialog
 import customtkinter as ctk
 from PIL import Image, ImageDraw, ImageTk
 
-APP_VERSION = '1.2.0'
+APP_VERSION = '1.3.0'
 GITHUB_REPO = 'MaaxxsDev/Aion-DPS-Meter'
 GITHUB_API_LATEST = f'https://api.github.com/repos/{GITHUB_REPO}/releases/latest'
 
 DEFAULT_LOG_PATH = r"D:\Origin\Chat.log"
-IDLE_TIMEOUT = 5.0       # Sekunden ohne Kampfaktion -> Pull gilt als beendet
-SESSION_IDLE_TIMEOUT = 600  # Sekunden ohne Kampfaktion -> Gesamt-Sitzung startet neu
+IDLE_TIMEOUT = 600       # Sekunden ohne Kampfaktion -> aktueller Kampf gilt als beendet und
+                         # wandert in den Verlauf (dieselbe Schwelle wie fuer neue Gruppe/Teleport)
 HISTORY_LIMIT = 20       # Anzahl gespeicherter vergangener Kaempfe
 POLL_INTERVAL = 0.25     # Sekunden zwischen Log-Polls
 REFRESH_MS = 400         # Datenaktualisierung in ms
 ANIM_MS = 33             # Balken-Animation in ms (~30fps)
-COPY_TOP_N = 7           # Anzahl Eintraege beim Kopieren (Aion-Chat hat Zeichenlimit)
+COPY_TOP_N = 5           # Anzahl Eintraege beim Kopieren (Aion-Chat hat Zeichenlimit)
 
 COL_SURFACE = '#1a1a19'
 COL_PAGE = '#0d0d0d'
@@ -330,7 +330,8 @@ STRINGS = {
         'copy': 'Kopieren',
         'stat_duration': 'Dauer', 'stat_damage': 'Gesamtschaden',
         'stat_dps': 'Raid-DPS', 'stat_heal': 'Gesamtheilung',
-        'tab_damage': 'Schaden', 'tab_heal': 'Heilung',
+        'tab_damage': 'Schaden', 'tab_heal': 'Heilung', 'tab_loot': 'Loottable',
+        'loot_col_player': 'Spieler', 'loot_col_item': 'Item', 'loot_col_qty': 'Menge',
         'no_update_current': 'Kein Update verfügbar - du bist aktuell.',
         'live_label': 'Live (aktueller Kampf)', 'total_session': 'Gesamt-Sitzung',
         'total_all_monsters': 'Gesamt (alle Monster)',
@@ -391,7 +392,8 @@ STRINGS = {
         'copy': 'Copy',
         'stat_duration': 'Duration', 'stat_damage': 'Total Damage',
         'stat_dps': 'Raid DPS', 'stat_heal': 'Total Healing',
-        'tab_damage': 'Damage', 'tab_heal': 'Healing',
+        'tab_damage': 'Damage', 'tab_heal': 'Healing', 'tab_loot': 'Loot Table',
+        'loot_col_player': 'Player', 'loot_col_item': 'Item', 'loot_col_qty': 'Qty',
         'no_update_current': 'No update available - you are up to date.',
         'live_label': 'Live (current fight)', 'total_session': 'Total session',
         'total_all_monsters': 'Total (all monsters)',
@@ -863,6 +865,43 @@ def is_self_key(name):
     return name == 'Du' or name.startswith('Du (')
 
 
+# Loot lines only ever carry a raw, unresolved item template ID (see LOOT_*_RE_DE/EN) - the name
+# has to be resolved separately. Two tiers:
+#  - CONFIRMED_ITEM_NAMES: hand-verified against this server's own client strings, one entry at a
+#    time as the user reports them (started from the Elim-Talisman II report). Always correct.
+#  - item_names.json (bundled resource): a ~78k-entry id->name table built the same way as the
+#    skill database (AionGermany/Aion-Lightning item_templates.xml `descr` codename joined against
+#    this client's own item string tables) - reliable for the vast majority of items, EXCEPT where
+#    OriginAion has repurposed a stock item ID for custom content, as confirmed for ID 186000051
+#    itself (stock: "Maechtige uralte Krone" / actually: "Glaenzender glorreicher Elim-Talisman
+#    II"). Shown but visibly marked as unverified, since it can be confidently wrong.
+CONFIRMED_ITEM_NAMES = {
+    186000051: 'Glänzender glorreicher Elim-Talisman II',
+}
+
+
+def _load_bulk_item_names():
+    try:
+        with open(resource_path('item_names.json'), 'r', encoding='utf-8') as f:
+            raw = json.load(f)
+        return {int(k): v for k, v in raw.items()}
+    except Exception:
+        return {}
+
+
+BULK_ITEM_NAMES = _load_bulk_item_names()
+
+
+def resolve_item_name(item_id):
+    """Returns (display_name, source) where source is 'confirmed', 'bulk' (best-effort, may be
+    wrong for a server-repurposed ID), or 'id' (no name known at all - just the raw number)."""
+    if item_id in CONFIRMED_ITEM_NAMES:
+        return CONFIRMED_ITEM_NAMES[item_id], 'confirmed'
+    if item_id in BULK_ITEM_NAMES:
+        return BULK_ITEM_NAMES[item_id], 'bulk'
+    return f'Item #{item_id}', 'id'
+
+
 # --- Deutsch --------------------------------------------------------------
 CRIT_PREFIX_DE = "Kritischer Treffer!"
 
@@ -889,9 +928,25 @@ HEAL_SELF_RE_DE = re.compile(
 # herbeigerufen." (no subject at all - verified directly from client_strings_msg.xml, not a typo).
 SUMMON_OTHER_RE_DE = re.compile(r'^(?P<owner>.+?) hat (?P<pet>.+?) durch .+? herbeigerufen\.')
 SUMMON_SELF_RE_DE = re.compile(r'^(?:Ihr habt )?(?P<pet>.+?) durch .+? herbeigerufen\.')
-# Session-boundary triggers (verified client strings: STR_PARTY_ENTERED_PARTY, STR_USE_ITEM).
+# Session-boundary triggers (verified client strings: STR_PARTY_ENTERED_PARTY, STR_USE_ITEM). The
+# teleport check below matches on 'rückkehr' specifically, not the broader 'schriftrolle' (=
+# "scroll") - checked the item database: ~430 items have "Schriftrolle" in the name and most of
+# them are combat/crafting buff scrolls (crit chance, evasion, precision, etc.) that an active
+# player pops every pull, which is exactly what caused a false reset "after every mob". The 57
+# actual city/fortress return items are consistently named "Rückkehr-Schriftrolle nach/zur X" or
+# "Rückkehr-Kugel zum X" - "rückkehr" alone is unique to those.
 PARTY_JOIN_RE_DE = re.compile(r'^Ihr seid der Gruppe beigetreten\.')
 ITEM_USE_RE_DE = re.compile(r'^Ihr habt "(?P<item>[^"]+)" benutzt\.')
+# Loot (STR_GET_ITEM/STR_MSG_GET_ITEM_PARTYNOTICE both render as "X hat/habt Y erhalten." - but
+# so do many unrelated messages (mail, EXP, Abyss Points, buff effects) that share the exact same
+# sentence shape. The angle-bracket <Item> the user first saw is only the in-game *rendering* of
+# an item link - the raw Chat.log line instead carries "[item:186000051;ver6;;;;]" (item template
+# ID, unresolved), confirmed against the user's own real log line. Anchoring on "[item:" is what
+# keeps this from flooding the loot table with "EP"/"Post"/buff-effect garbage; the numeric ID is
+# resolved to a display name separately (see resolve_item_name), since names aren't in the log.
+LOOT_SELF_RE_DE = re.compile(r'^Ihr habt (?:(?P<qty>\d+) )?\[item:\s*(?P<item_id>\d+)[^\]]*\] erhalten\.')
+LOOT_OTHER_RE_DE = re.compile(
+    r'^(?P<looter>.+?) hat (?:(?P<qty>\d+) )?\[item:\s*(?P<item_id>\d+)[^\]]*\] erhalten\.')
 
 
 def normalize_name_de(name):
@@ -947,8 +1002,17 @@ def parse_line_de(rest, crit):
     if PARTY_JOIN_RE_DE.match(rest):
         return {'type': 'session_break', 'reason': 'party'}
     m = ITEM_USE_RE_DE.match(rest)
-    if m and 'schriftrolle' in m.group('item').lower():
+    if m and 'rückkehr' in m.group('item').lower():
         return {'type': 'session_break', 'reason': 'teleport'}
+    m = LOOT_SELF_RE_DE.match(rest)
+    if m:
+        return {'type': 'loot', 'looter': 'Du', 'item_id': int(m.group('item_id')),
+                'qty': int(m.group('qty')) if m.group('qty') else 1}
+    m = LOOT_OTHER_RE_DE.match(rest)
+    if m:
+        return {'type': 'loot', 'looter': normalize_name_de(m.group('looter')),
+                'item_id': int(m.group('item_id')),
+                'qty': int(m.group('qty')) if m.group('qty') else 1}
     return None
 
 
@@ -993,9 +1057,22 @@ HEAL_SELF_PLAIN_RE_EN = re.compile(
 # Pet/servant summon announcement - always has an explicit subject in English ("You"/"[Caster]"),
 # so one pattern covers both my-own and someone-else's summon; normalize_name_en handles "You".
 SUMMON_RE_EN = re.compile(r'^(?P<owner>.+?) summoned (?P<pet>.+?) by using .+?\.')
-# Session-boundary triggers (verified client strings: STR_PARTY_ENTERED_PARTY, STR_USE_ITEM).
+# Session-boundary triggers (verified client strings: STR_PARTY_ENTERED_PARTY, STR_USE_ITEM). No
+# single keyword cleanly separates English return-teleport items from other scrolls the way German
+# "rückkehr" does (checked: city scrolls are named inconsistently, e.g. "Sanctum Instant Scroll",
+# "Kamar Scroll", "[Event] Quick-return Scroll" - no shared word across all of them). Matching
+# "return" catches a good chunk of them without also matching ordinary combat/craft buff scrolls,
+# but expect a real gap here versus the German match - not yet verified against a live EN session.
 PARTY_JOIN_RE_EN = re.compile(r'^You have joined the group\.')
 ITEM_USE_RE_EN = re.compile(r'^You have used (?P<item>.+?)\.$')
+# Loot - "[item:186000051;ver6;;;;]" (unresolved item template ID) was confirmed from a real
+# German raw log line; assumed to carry over unchanged to English since it's a raw data tag the
+# client embeds, not translated text - the surrounding sentence differs by language but this tag
+# syntax shouldn't. Still not verified against a real English sample - check here first if it
+# doesn't show up.
+LOOT_SELF_RE_EN = re.compile(r'^You have acquired (?:(?P<qty>\d+) )?\[item:\s*(?P<item_id>\d+)[^\]]*\]\.')
+LOOT_OTHER_RE_EN = re.compile(
+    r'^(?P<looter>.+?) has acquired (?:(?P<qty>\d+) )?\[item:\s*(?P<item_id>\d+)[^\]]*\]\.')
 
 
 def normalize_name_en(name):
@@ -1060,8 +1137,17 @@ def parse_line_en(rest, crit):
     if PARTY_JOIN_RE_EN.match(rest):
         return {'type': 'session_break', 'reason': 'party'}
     m = ITEM_USE_RE_EN.match(rest)
-    if m and 'scroll' in m.group('item').lower():
+    if m and 'return' in m.group('item').lower():
         return {'type': 'session_break', 'reason': 'teleport'}
+    m = LOOT_SELF_RE_EN.match(rest)
+    if m:
+        return {'type': 'loot', 'looter': 'Du', 'item_id': int(m.group('item_id')),
+                'qty': int(m.group('qty')) if m.group('qty') else 1}
+    m = LOOT_OTHER_RE_EN.match(rest)
+    if m:
+        return {'type': 'loot', 'looter': normalize_name_en(m.group('looter')),
+                'item_id': int(m.group('item_id')),
+                'qty': int(m.group('qty')) if m.group('qty') else 1}
     return None
 
 
@@ -1092,6 +1178,8 @@ class Encounter:
         self.end = None
         self.damage_events = []
         self.heal_events = []
+        self.loot_totals = {}  # looter name -> {item_id: (quantity, last_touched_t)} - name
+        # resolved at render time; last_touched_t drives the newest-at-the-bottom feed ordering.
         self._summary_cache = None
 
     def add_damage(self, ev, t):
@@ -1107,6 +1195,11 @@ class Encounter:
         self.end = t
         self.heal_events.append((t, ev))
         self._summary_cache = None
+
+    def add_loot(self, looter, item_id, qty, t):
+        items = self.loot_totals.setdefault(looter, {})
+        prev_qty, _ = items.get(item_id, (0, 0))
+        items[item_id] = (prev_qty + qty, t)
 
     def duration(self):
         if self.start is None:
@@ -1240,9 +1333,17 @@ class EncounterManager:
                 return
             if ev['type'] == 'session_break':
                 # New group formed/joined, or a teleport scroll used - both mean whatever comes
-                # next is a new activity, so the running Gesamt-Sitzung starts over rather than
-                # mixing unrelated content together.
-                self._reset_locked()
+                # next is a new activity, so the current pull (if any) is archived into history
+                # right away instead of waiting out the idle timeout. Gesamt-Sitzung is untouched -
+                # it only ever clears on a manual Reset, same as before this feature existed.
+                if self.current is not None:
+                    self._finalize_current()
+                return
+            if ev['type'] == 'loot':
+                looter = self._resolve_self_identity(ev['looter'], None)
+                self.session.add_loot(looter, ev['item_id'], ev['qty'], t)
+                if self.current is not None:
+                    self.current.add_loot(looter, ev['item_id'], ev['qty'], t)
                 return
             if ev['type'] == 'damage':
                 ev['attacker'] = self.pet_owners.get(ev['attacker'], ev['attacker'])
@@ -1266,8 +1367,6 @@ class EncounterManager:
             if self.current is not None and self.current.end is not None:
                 if t - self.current.end > IDLE_TIMEOUT:
                     self._finalize_current()
-            if self.session.end is not None and t - self.session.end > SESSION_IDLE_TIMEOUT:
-                self._reset_locked()
 
     def _finalize_current(self):
         enc = self.current
@@ -1282,21 +1381,16 @@ class EncounterManager:
         label += f" - {top_monster}"
         if extra > 0:
             label += f" (+{extra})"
-        label += f" ({summary['duration']:.0f}s)"
+        label += f" ({fmt_duration(summary['duration'])})"
         enc.label = label
         self.history.insert(0, enc)
         del self.history[HISTORY_LIMIT:]
 
-    def _reset_locked(self):
-        """Body of reset_all() - callers that already hold self.lock (feed(), check_idle()) call
-        this directly; threading.Lock isn't reentrant, so reset_all() below must not be reused."""
-        self.session = Encounter(label=tr('total_session'))
-        self.current = None
-        self.history = []
-
     def reset_all(self):
         with self.lock:
-            self._reset_locked()
+            self.session = Encounter(label=tr('total_session'))
+            self.current = None
+            self.history = []
 
     def get_labels(self):
         with self.lock:
@@ -1373,6 +1467,19 @@ def tail_file(manager, stop_event):
 
 def fmt_num(n):
     return f'{n:,}'.replace(',', '.')
+
+
+def fmt_duration(seconds):
+    """45s / 10min 23s / 1h 5min - pulls can now run up to 10 minutes (see IDLE_TIMEOUT) and
+    Gesamt-Sitzung longer still, so a plain seconds count stopped being readable."""
+    seconds = int(seconds)
+    if seconds < 60:
+        return f'{seconds}s'
+    minutes, secs = divmod(seconds, 60)
+    if minutes < 60:
+        return f'{minutes}min {secs}s' if secs else f'{minutes}min'
+    hours, mins = divmod(minutes, 60)
+    return f'{hours}h {mins}min' if mins else f'{hours}h'
 
 
 def _rounded_rect_points(x1, y1, x2, y2, r):
@@ -1563,14 +1670,93 @@ class MeterList:
     def copy_all(self, header):
         ranked = sorted(self.row_data, key=lambda k: self.row_data[k]['rank'])[:COPY_TOP_N]
         parts = [
-            f"{self.row_data[k]['rank']}.{self.row_data[k]['name']} "
-            f"{fmt_num(self.row_data[k]['value'])}({self.row_data[k]['pct_total']:.0f}%)"
+            f"{self.row_data[k]['name']} {fmt_num(self.row_data[k]['value'])}"
             for k in ranked
         ]
-        text = f"{header}: " + ' '.join(parts) if header else ' '.join(parts)
+        text = f"{header}: " + ', '.join(parts) if header else ', '.join(parts)
         self.scroll.clipboard_clear()
         self.scroll.clipboard_append(text)
         self.scroll.update()
+
+
+class LootList:
+    """Chronological feed (oldest on top, newest at the bottom - like a chat log), not a sortable
+    table. Rows are created once per (looter, item_id) key and updated/repositioned in place on
+    later calls rather than destroyed and rebuilt - render() used to wipe and recreate every
+    widget on every 400ms refresh tick, which is what caused the flicker. Auto-scrolls to the
+    bottom, but only when something actually changed, so it doesn't fight a manual scroll-up
+    during a quiet moment with no new loot."""
+
+    def __init__(self, parent, fonts):
+        self.fonts = fonts
+        self.scroll = ctk.CTkScrollableFrame(parent, fg_color=COL_SURFACE, corner_radius=12,
+                                              scrollbar_fg_color=COL_SURFACE,
+                                              scrollbar_button_color=COL_TRACK_HOVER,
+                                              scrollbar_button_hover_color=COL_ACCENT)
+        self.scroll.columnconfigure(0, weight=2)
+        self.scroll.columnconfigure(1, weight=3)
+        self.scroll.columnconfigure(2, weight=1)
+        self.rows = {}  # (looter, item_id) -> (name_lbl, item_lbl, qty_lbl)
+        self._last_rendered = None
+        self.empty_label = ctk.CTkLabel(self.scroll, text=tr('no_data_view'),
+                                         text_color=COL_INK_MUTED, font=fonts['sub'])
+        self._build_header()
+
+    def pack(self, **kw):
+        self.scroll.pack(**kw)
+
+    def _build_header(self):
+        pad = {'padx': 12, 'pady': (8, 4)}
+        headers = [(tr('loot_col_player'), 'w'), (tr('loot_col_item'), 'w'), (tr('loot_col_qty'), 'e')]
+        for col, (text, anchor) in enumerate(headers):
+            ctk.CTkLabel(self.scroll, text=text, font=self.fonts['sub'], text_color=COL_INK_MUTED,
+                         anchor=anchor).grid(row=0, column=col, sticky='ew', **pad)
+
+    def render(self, entries):
+        """entries: ordered list (oldest first, newest last) of (key, player, item, qty, source),
+        source being 'confirmed'/'bulk'/'id' from resolve_item_name() - 'bulk' names are
+        best-effort and get a trailing "*" since they can be confidently wrong for a
+        server-repurposed item ID."""
+        changed = entries != self._last_rendered
+        self._last_rendered = entries
+        pad = {'padx': 12, 'pady': 3}
+        seen = set()
+        for i, (key, player, item, qty, source) in enumerate(entries, start=1):
+            seen.add(key)
+            item_text = f'{item} *' if source == 'bulk' else item
+            if key in self.rows:
+                name_lbl, item_lbl, qty_lbl = self.rows[key]
+                name_lbl.configure(text=player)
+                item_lbl.configure(text=item_text)
+                qty_lbl.configure(text=fmt_num(qty))
+                for w in (name_lbl, item_lbl, qty_lbl):
+                    w.grid_configure(row=i)
+            else:
+                name_lbl = ctk.CTkLabel(self.scroll, text=player, font=self.fonts['ui'],
+                                         text_color=COL_INK_PRIMARY, anchor='w')
+                item_lbl = ctk.CTkLabel(self.scroll, text=item_text, font=self.fonts['ui'],
+                                         text_color=COL_INK_SECONDARY, anchor='w')
+                qty_lbl = ctk.CTkLabel(self.scroll, text=fmt_num(qty), font=self.fonts['ui'],
+                                        text_color=COL_INK_PRIMARY, anchor='e')
+                name_lbl.grid(row=i, column=0, sticky='ew', **pad)
+                item_lbl.grid(row=i, column=1, sticky='ew', **pad)
+                qty_lbl.grid(row=i, column=2, sticky='ew', **pad)
+                self.rows[key] = (name_lbl, item_lbl, qty_lbl)
+
+        stale = [k for k in self.rows if k not in seen]
+        for k in stale:
+            for w in self.rows[k]:
+                w.destroy()
+            del self.rows[k]
+
+        if not entries:
+            self.empty_label.grid(row=1, column=0, columnspan=3, pady=20)
+            return
+        self.empty_label.grid_forget()
+
+        if changed:
+            self.scroll.update_idletasks()
+            self.scroll._parent_canvas.yview_moveto(1.0)
 
 
 class MonsterDropdown:
@@ -1919,8 +2105,10 @@ class MeterApp:
         self.tabview.pack(fill='both', expand=True, padx=16, pady=8)
         self.tab_damage_name = tr('tab_damage')
         self.tab_heal_name = tr('tab_heal')
+        self.tab_loot_name = tr('tab_loot')
         self.tabview.add(self.tab_damage_name)
         self.tabview.add(self.tab_heal_name)
+        self.tabview.add(self.tab_loot_name)
 
         dmg_tab = self.tabview.tab(self.tab_damage_name)
         self.monster_dropdown = MonsterDropdown(dmg_tab, self.fonts, on_select=self.on_target_select)
@@ -1931,6 +2119,10 @@ class MeterApp:
         heal_tab = self.tabview.tab(self.tab_heal_name)
         self.heal_list = MeterList(heal_tab, self.fonts, self._resolve_class, self.icon_photos)
         self.heal_list.pack(fill='both', expand=True, padx=2, pady=2)
+
+        loot_tab = self.tabview.tab(self.tab_loot_name)
+        self.loot_list = LootList(loot_tab, self.fonts)
+        self.loot_list.pack(fill='both', expand=True, padx=2, pady=2)
 
         # --- status bar ---
         status = ctk.CTkFrame(root, fg_color=COL_PAGE, corner_radius=0)
@@ -1994,10 +2186,10 @@ class MeterApp:
         if active == self.tab_damage_name:
             selected = self.monster_dropdown.selected
             target = selected if selected else tr('copy_total_fallback')
-            header = f"DPS {target} ({dur:.0f}s)"
+            header = f"{target} ({fmt_duration(dur)})"
             self.dmg_list.copy_all(header)
         else:
-            header = f"Heal ({dur:.0f}s)"
+            header = f"Heal ({fmt_duration(dur)})"
             self.heal_list.copy_all(header)
 
     def on_encounter_change(self, value):
@@ -2047,6 +2239,8 @@ class MeterApp:
             self.dmg_list.render([], tr('unit_damage'), 'DPS')
             self.heal_list.render([], tr('unit_heal'), 'HPS')
 
+        self.render_loot()
+
         self.status_label.configure(
             text=f"{self.manager.log_status}   \u00b7   {tr('lines_processed', n=fmt_num(self.manager.lines_processed))}"
         )
@@ -2054,7 +2248,7 @@ class MeterApp:
 
     def render_stats(self, summary):
         dur = summary['duration']
-        self.stat_values['dur'].configure(text=f"{dur:.0f}s")
+        self.stat_values['dur'].configure(text=fmt_duration(dur))
         self.stat_values['dmg'].configure(text=fmt_num(summary['total_damage']))
         self.stat_values['dps'].configure(text=fmt_num(int(summary['total_damage'] / dur)) if dur else '0')
         self.stat_values['heal'].configure(text=fmt_num(summary['total_heal']))
@@ -2104,6 +2298,22 @@ class MeterApp:
         ]
         items.sort(key=lambda it: -it[2])
         self.heal_list.render(items, tr('unit_heal'), 'HPS')
+
+    def render_loot(self):
+        # Loot lives on the running Gesamt-Sitzung itself, not the encounter dropdown selection -
+        # it naturally clears together with it (manual Reset, group join, teleport, 10 min idle).
+        # Ordered oldest-first/newest-last (a feed, not an alphabetical table): a repeat pickup of
+        # the same (player, item) bumps its existing row back to the bottom instead of adding a
+        # duplicate, since last_t is what's actually sorted on.
+        entries = []
+        for looter, items in self.manager.session.loot_totals.items():
+            display = self._display_name(looter)
+            for item_id, (qty, last_t) in items.items():
+                name, source = resolve_item_name(item_id)
+                key = (looter, item_id)
+                entries.append((last_t, key, display, name, qty, source))
+        entries.sort(key=lambda e: e[0])
+        self.loot_list.render([e[1:] for e in entries])
 
 
 def main():
