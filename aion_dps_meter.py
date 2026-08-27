@@ -15,12 +15,13 @@ from tkinter import filedialog
 import customtkinter as ctk
 from PIL import Image, ImageDraw, ImageTk
 
-APP_VERSION = '1.1.0'
+APP_VERSION = '1.2.0'
 GITHUB_REPO = 'MaaxxsDev/Aion-DPS-Meter'
 GITHUB_API_LATEST = f'https://api.github.com/repos/{GITHUB_REPO}/releases/latest'
 
 DEFAULT_LOG_PATH = r"D:\Origin\Chat.log"
 IDLE_TIMEOUT = 5.0       # Sekunden ohne Kampfaktion -> Pull gilt als beendet
+SESSION_IDLE_TIMEOUT = 600  # Sekunden ohne Kampfaktion -> Gesamt-Sitzung startet neu
 HISTORY_LIMIT = 20       # Anzahl gespeicherter vergangener Kaempfe
 POLL_INTERVAL = 0.25     # Sekunden zwischen Log-Polls
 REFRESH_MS = 400         # Datenaktualisierung in ms
@@ -888,6 +889,9 @@ HEAL_SELF_RE_DE = re.compile(
 # herbeigerufen." (no subject at all - verified directly from client_strings_msg.xml, not a typo).
 SUMMON_OTHER_RE_DE = re.compile(r'^(?P<owner>.+?) hat (?P<pet>.+?) durch .+? herbeigerufen\.')
 SUMMON_SELF_RE_DE = re.compile(r'^(?:Ihr habt )?(?P<pet>.+?) durch .+? herbeigerufen\.')
+# Session-boundary triggers (verified client strings: STR_PARTY_ENTERED_PARTY, STR_USE_ITEM).
+PARTY_JOIN_RE_DE = re.compile(r'^Ihr seid der Gruppe beigetreten\.')
+ITEM_USE_RE_DE = re.compile(r'^Ihr habt "(?P<item>[^"]+)" benutzt\.')
 
 
 def normalize_name_de(name):
@@ -940,6 +944,11 @@ def parse_line_de(rest, crit):
     m = SUMMON_SELF_RE_DE.match(rest)
     if m:
         return {'type': 'summon', 'owner': 'Du', 'pet': m.group('pet')}
+    if PARTY_JOIN_RE_DE.match(rest):
+        return {'type': 'session_break', 'reason': 'party'}
+    m = ITEM_USE_RE_DE.match(rest)
+    if m and 'schriftrolle' in m.group('item').lower():
+        return {'type': 'session_break', 'reason': 'teleport'}
     return None
 
 
@@ -984,6 +993,9 @@ HEAL_SELF_PLAIN_RE_EN = re.compile(
 # Pet/servant summon announcement - always has an explicit subject in English ("You"/"[Caster]"),
 # so one pattern covers both my-own and someone-else's summon; normalize_name_en handles "You".
 SUMMON_RE_EN = re.compile(r'^(?P<owner>.+?) summoned (?P<pet>.+?) by using .+?\.')
+# Session-boundary triggers (verified client strings: STR_PARTY_ENTERED_PARTY, STR_USE_ITEM).
+PARTY_JOIN_RE_EN = re.compile(r'^You have joined the group\.')
+ITEM_USE_RE_EN = re.compile(r'^You have used (?P<item>.+?)\.$')
 
 
 def normalize_name_en(name):
@@ -1045,6 +1057,11 @@ def parse_line_en(rest, crit):
     m = SUMMON_RE_EN.match(rest)
     if m:
         return {'type': 'summon', 'owner': normalize_name_en(m.group('owner')), 'pet': m.group('pet')}
+    if PARTY_JOIN_RE_EN.match(rest):
+        return {'type': 'session_break', 'reason': 'party'}
+    m = ITEM_USE_RE_EN.match(rest)
+    if m and 'scroll' in m.group('item').lower():
+        return {'type': 'session_break', 'reason': 'teleport'}
     return None
 
 
@@ -1221,6 +1238,12 @@ class EncounterManager:
             if ev['type'] == 'summon':
                 self.pet_owners[ev['pet']] = ev['owner']
                 return
+            if ev['type'] == 'session_break':
+                # New group formed/joined, or a teleport scroll used - both mean whatever comes
+                # next is a new activity, so the running Gesamt-Sitzung starts over rather than
+                # mixing unrelated content together.
+                self._reset_locked()
+                return
             if ev['type'] == 'damage':
                 ev['attacker'] = self.pet_owners.get(ev['attacker'], ev['attacker'])
                 ev['attacker'] = self._resolve_self_identity(ev['attacker'], ev.get('skill'))
@@ -1243,6 +1266,8 @@ class EncounterManager:
             if self.current is not None and self.current.end is not None:
                 if t - self.current.end > IDLE_TIMEOUT:
                     self._finalize_current()
+            if self.session.end is not None and t - self.session.end > SESSION_IDLE_TIMEOUT:
+                self._reset_locked()
 
     def _finalize_current(self):
         enc = self.current
@@ -1262,11 +1287,16 @@ class EncounterManager:
         self.history.insert(0, enc)
         del self.history[HISTORY_LIMIT:]
 
+    def _reset_locked(self):
+        """Body of reset_all() - callers that already hold self.lock (feed(), check_idle()) call
+        this directly; threading.Lock isn't reentrant, so reset_all() below must not be reused."""
+        self.session = Encounter(label=tr('total_session'))
+        self.current = None
+        self.history = []
+
     def reset_all(self):
         with self.lock:
-            self.session = Encounter(label=tr('total_session'))
-            self.current = None
-            self.history = []
+            self._reset_locked()
 
     def get_labels(self):
         with self.lock:
