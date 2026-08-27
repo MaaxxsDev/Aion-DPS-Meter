@@ -2,12 +2,15 @@
 
 import os
 import re
+import io
 import sys
+import html
 import json
 import time
 import threading
 import subprocess
 import tempfile
+import webbrowser
 import urllib.request
 from collections import Counter
 import tkinter as tk
@@ -15,7 +18,7 @@ from tkinter import filedialog
 import customtkinter as ctk
 from PIL import Image, ImageDraw, ImageTk
 
-APP_VERSION = '1.4.0'
+APP_VERSION = '1.5.0'
 GITHUB_REPO = 'MaaxxsDev/Aion-DPS-Meter'
 GITHUB_API_LATEST = f'https://api.github.com/repos/{GITHUB_REPO}/releases/latest'
 
@@ -198,6 +201,19 @@ def build_class_icons():
     return {code: img.resize((ICON_PX, ICON_PX), Image.LANCZOS) for code, img in icons.items()}
 
 
+# Seed list for Settings.known_fortresses (Raidmodus fortress selector), read off the user's own
+# siege schedule screenshot (originaion.com/schedule, Siege+Weekly filters - the live page itself
+# is JS-rendered and unfetchable, see aion_ap_tracking memory). "Miren/Krotan/Kysis" was shown as
+# one combined schedule slot but split into 3 separate selectable entries here, since during an
+# actual raid the group is at exactly one specific fortress, not all three at once. Only applies to
+# a brand new settings file - an existing one keeps whatever the user has already typed/edited.
+DEFAULT_FORTRESSES = [
+    'Sulfur', "Siel's Western", "Siel's Eastern", 'Roah', 'Asteria',
+    'Temple of Scales', 'Altar of Avarice', 'Vorgaltem Citadel', 'Crimson Temple',
+    'Tiamaranta', 'Sillus', 'Silona', 'Pradeth', 'Miren', 'Krotan', 'Kysis', 'Divine',
+]
+
+
 class Settings:
     """Persists log path, the user's own character name, language, and per-player class assignments.
 
@@ -214,13 +230,16 @@ class Settings:
             folder = f'AionDPSMeter_{safe}'
         self.settings_file = os.path.join(user_data_dir(folder), 'settings.json')
         self.data = {'log_path': DEFAULT_LOG_PATH, 'character_name': '', 'language': 'de',
-                     'dual_account_mode': False, 'hide_npcs': False, 'classes': {}}
+                     'dual_account_mode': False, 'hide_npcs': False, 'classes': {},
+                     'known_fortresses': list(DEFAULT_FORTRESSES)}
         try:
             with open(self.settings_file, 'r', encoding='utf-8') as f:
                 loaded = json.load(f)
             self.data.update({k: v for k, v in loaded.items() if k in self.data})
             if 'classes' in loaded and isinstance(loaded['classes'], dict):
                 self.data['classes'] = loaded['classes']
+            if 'known_fortresses' in loaded and isinstance(loaded['known_fortresses'], list):
+                self.data['known_fortresses'] = [str(x) for x in loaded['known_fortresses']]
         except Exception:
             pass
         if self.data.get('language') not in ('de', 'en'):
@@ -253,6 +272,10 @@ class Settings:
     def hide_npcs(self):
         return bool(self.data.get('hide_npcs', False))
 
+    @property
+    def known_fortresses(self):
+        return list(self.data.get('known_fortresses', []))
+
     def set_log_path(self, path):
         self.data['log_path'] = path or DEFAULT_LOG_PATH
         self._save()
@@ -271,6 +294,13 @@ class Settings:
 
     def set_hide_npcs(self, enabled):
         self.data['hide_npcs'] = bool(enabled)
+        self._save()
+
+    def add_fortress(self, name):
+        name = (name or '').strip()
+        if not name or name in self.data['known_fortresses']:
+            return
+        self.data['known_fortresses'].append(name)
         self._save()
 
     def get_class(self, name):
@@ -338,8 +368,20 @@ STRINGS = {
         'copy': 'Kopieren',
         'stat_duration': 'Dauer', 'stat_damage': 'Gesamtschaden',
         'stat_dps': 'Raid-DPS', 'stat_heal': 'Gesamtheilung',
-        'tab_damage': 'Schaden', 'tab_heal': 'Heilung', 'tab_loot': 'Loottable',
+        'tab_damage': 'Schaden', 'tab_heal': 'Heilung', 'tab_loot': 'Loottable', 'tab_ap': 'Abysspunkte',
         'loot_col_player': 'Spieler', 'loot_col_item': 'Item', 'loot_col_qty': 'Menge',
+        'ap_total_label': 'Gesamt Abysspunkte', 'ap_reset_button': 'AP zurücksetzen',
+        'raid_mode_start': 'Raidmodus starten', 'raid_mode_stop': 'Raidmodus beenden',
+        'fortress_label': 'Festung:', 'fortress_placeholder': 'Festung wählen oder eingeben',
+        'fortress_col_name': 'Festung', 'fortress_col_ap': 'AP',
+        'ap_self_only_hint': 'Nur deine eigenen AP - das Spiel meldet AP-Gewinne anderer Spieler nicht im Chat.log.',
+        'item_popup_loading': 'Lade Item-Informationen…',
+        'item_popup_error': 'Konnte Item-Informationen nicht laden (offline oder Seite nicht erreichbar).',
+        'item_popup_stock_disclaimer': 'Basiert auf Standard-Aion-Daten (Aion Codex) - kann von OriginAion abweichen, falls der Server dieses Item angepasst hat.',
+        'item_popup_open_browser': 'Auf Aion Codex öffnen',
+        'item_popup_price_label': 'Preis',
+        'item_popup_buy': 'Kauf',
+        'item_popup_sell': 'Verkauf',
         'no_update_current': 'Kein Update verfügbar - du bist aktuell.',
         'live_label': 'Live (aktueller Kampf)', 'total_session': 'Gesamt-Sitzung',
         'total_all_monsters': 'Gesamt (alle Monster)',
@@ -401,8 +443,20 @@ STRINGS = {
         'copy': 'Copy',
         'stat_duration': 'Duration', 'stat_damage': 'Total Damage',
         'stat_dps': 'Raid DPS', 'stat_heal': 'Total Healing',
-        'tab_damage': 'Damage', 'tab_heal': 'Healing', 'tab_loot': 'Loot Table',
+        'tab_damage': 'Damage', 'tab_heal': 'Healing', 'tab_loot': 'Loot Table', 'tab_ap': 'Abyss Points',
         'loot_col_player': 'Player', 'loot_col_item': 'Item', 'loot_col_qty': 'Qty',
+        'ap_total_label': 'Total Abyss Points', 'ap_reset_button': 'Reset AP',
+        'raid_mode_start': 'Start Raid Mode', 'raid_mode_stop': 'Stop Raid Mode',
+        'fortress_label': 'Fortress:', 'fortress_placeholder': 'Select or type a fortress',
+        'fortress_col_name': 'Fortress', 'fortress_col_ap': 'AP',
+        'ap_self_only_hint': "Your own AP only - the game doesn't report other players' AP gains in Chat.log.",
+        'item_popup_loading': 'Loading item info…',
+        'item_popup_error': "Couldn't load item info (offline or the site is unreachable).",
+        'item_popup_stock_disclaimer': 'Based on stock Aion data (Aion Codex) - may differ from OriginAion if the server customized this item.',
+        'item_popup_open_browser': 'Open on Aion Codex',
+        'item_popup_price_label': 'Price',
+        'item_popup_buy': 'Buy',
+        'item_popup_sell': 'Sell',
         'no_update_current': 'No update available - you are up to date.',
         'live_label': 'Live (current fight)', 'total_session': 'Total session',
         'total_all_monsters': 'Total (all monsters)',
@@ -957,6 +1011,72 @@ def resolve_item_color(item_id):
     return QUALITY_COLORS.get(quality, DEFAULT_ITEM_COLOR)
 
 
+# --- Live item-info popup (Loottable -> click an item) --------------------------------------
+# aioncodex.com's individual item pages (unlike its skill tables, see aion_wiki_access memory) are
+# plain server-rendered HTML - confirmed by fetching one directly and cross-checking its stats
+# against item_templates.xml for the same ID (exact match: weapon damage, accuracy, parry, etc.),
+# meaning it's built from the same/an equivalent Aion-Lightning-family source. That also means the
+# SAME stock-vs-repurposed-ID caveat as BULK_ITEM_NAMES applies here - confirmed directly: item
+# 186000051 shows as "Major Ancient Crown" on Aion Codex, not OriginAion's actual "Elim-Talisman
+# II". Shown to the user as an explicit disclaimer in the popup itself (see aion_wiki_item_popup
+# memory), same as the '*' marker on bulk item names.
+AION_CODEX_ITEM_URL = 'https://aioncodex.com/us/item/{id}/'
+ITEM_INFO_NAME_RE = re.compile(
+    r'<span class="item_title item_grade_\d+" id="item_name"><b>(.*?)</b></span>')
+ITEM_INFO_ICON_RE = re.compile(r'<img src="(/items/[^"]+)" class="item_icon')
+ITEM_INFO_STATS_RE = re.compile(r'<div class="stat_name">(.*?)</div><div class="stat_value">(.*?)</div>')
+ITEM_INFO_TITLES_RE = re.compile(r'class="titles_cell">(.*?)</td>', re.DOTALL)
+ITEM_INFO_PRICE_RE = re.compile(r'Buy price: ([\d,]+).*?Sell price: ([\d,]+)', re.DOTALL)
+
+
+def _strip_html_to_lines(fragment):
+    text = re.sub(r'<br\s*/?>', '\n', fragment)
+    text = re.sub(r'<[^>]+>', '', text)
+    text = html.unescape(text)
+    return [ln.strip() for ln in text.split('\n') if ln.strip()]
+
+
+def fetch_item_info(item_id):
+    """Live-fetches and parses one item's Aion Codex page. Runs on a background thread (see
+    ItemInfoPopup) - never raises, returns None on any failure (offline, timeout, site down, page
+    shape changed) so a failed lookup just shows an error state instead of crashing the popup."""
+    url = AION_CODEX_ITEM_URL.format(id=item_id)
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'AionDPSMeter/' + APP_VERSION})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            page = resp.read().decode('utf-8', errors='replace')
+    except Exception:
+        return None
+
+    m = ITEM_INFO_NAME_RE.search(page)
+    if not m:
+        return None
+    name = html.unescape(m.group(1)).strip()
+
+    stats = [(html.unescape(k).strip(), html.unescape(v).strip())
+             for k, v in ITEM_INFO_STATS_RE.findall(page)]
+
+    titles_m = ITEM_INFO_TITLES_RE.search(page)
+    detail_lines = _strip_html_to_lines(titles_m.group(1)) if titles_m else []
+
+    price_m = ITEM_INFO_PRICE_RE.search(page)
+    price = (price_m.group(1), price_m.group(2)) if price_m else None
+
+    icon_bytes = None
+    icon_m = ITEM_INFO_ICON_RE.search(page)
+    if icon_m:
+        try:
+            icon_req = urllib.request.Request('https://aioncodex.com' + icon_m.group(1),
+                                                headers={'User-Agent': 'AionDPSMeter/' + APP_VERSION})
+            with urllib.request.urlopen(icon_req, timeout=8) as resp:
+                icon_bytes = resp.read()
+        except Exception:
+            pass
+
+    return {'name': name, 'stats': stats, 'detail_lines': detail_lines, 'price': price,
+            'icon_bytes': icon_bytes, 'url': url}
+
+
 # --- Deutsch --------------------------------------------------------------
 CRIT_PREFIX_DE = "Kritischer Treffer!"
 
@@ -992,6 +1112,12 @@ SUMMON_SELF_RE_DE = re.compile(r'^(?:Ihr habt )?(?P<pet>.+?) durch .+? herbeiger
 # "Rückkehr-Kugel zum X" - "rückkehr" alone is unique to those.
 PARTY_JOIN_RE_DE = re.compile(r'^Ihr seid der Gruppe beigetreten\.')
 ITEM_USE_RE_DE = re.compile(r'^Ihr habt "(?P<item>[^"]+)" benutzt\.')
+# Abyss Point gain (STR_MSG_COMBAT_MY_ABYSS_POINT_GAIN, verified in client_strings_msg.xml: "Ihr
+# habt %num0 Abyss-Punkte erhalten.") - self only, there is no "PlayerX hat Y Abyss-Punkte
+# erhalten" equivalent anywhere in the client strings (checked deliberately, since loot has
+# exactly that self/other split) - so this can only ever track the log owner's own AP, never other
+# party members'. See aion_ap_tracking memory.
+AP_GAIN_RE_DE = re.compile(r'^Ihr habt (?P<amount>[0-9]+(?:\.[0-9]{3})*) Abyss-Punkte erhalten\.')
 # Loot (STR_GET_ITEM/STR_MSG_GET_ITEM_PARTYNOTICE both render as "X hat/habt Y erhalten." - but
 # so do many unrelated messages (mail, EXP, Abyss Points, buff effects) that share the exact same
 # sentence shape. The angle-bracket <Item> the user first saw is only the in-game *rendering* of
@@ -1059,6 +1185,9 @@ def parse_line_de(rest, crit):
     m = ITEM_USE_RE_DE.match(rest)
     if m and 'rückkehr' in m.group('item').lower():
         return {'type': 'session_break', 'reason': 'teleport'}
+    m = AP_GAIN_RE_DE.match(rest)
+    if m:
+        return {'type': 'ap_gain', 'amount': parse_amount_de(m.group('amount'))}
     m = LOOT_SELF_RE_DE.match(rest)
     if m:
         return {'type': 'loot', 'looter': 'Du', 'item_id': int(m.group('item_id')),
@@ -1120,6 +1249,9 @@ SUMMON_RE_EN = re.compile(r'^(?P<owner>.+?) summoned (?P<pet>.+?) by using .+?\.
 # but expect a real gap here versus the German match - not yet verified against a live EN session.
 PARTY_JOIN_RE_EN = re.compile(r'^You have joined the group\.')
 ITEM_USE_RE_EN = re.compile(r'^You have used (?P<item>.+?)\.$')
+# Abyss Point gain - client string 1320000, "You have gained %num0 Abyss Points." (verified
+# alongside the German "Ihr habt %num0 Abyss-Punkte erhalten." - both self only, see AP_GAIN_RE_DE).
+AP_GAIN_RE_EN = re.compile(r'^You have gained (?P<amount>[0-9]+(?:,[0-9]{3})*) Abyss Points\.')
 # Loot - "[item:186000051;ver6;;;;]" (unresolved item template ID) was confirmed from a real
 # German raw log line; assumed to carry over unchanged to English since it's a raw data tag the
 # client embeds, not translated text - the surrounding sentence differs by language but this tag
@@ -1194,6 +1326,9 @@ def parse_line_en(rest, crit):
     m = ITEM_USE_RE_EN.match(rest)
     if m and 'return' in m.group('item').lower():
         return {'type': 'session_break', 'reason': 'teleport'}
+    m = AP_GAIN_RE_EN.match(rest)
+    if m:
+        return {'type': 'ap_gain', 'amount': parse_amount_en(m.group('amount'))}
     m = LOOT_SELF_RE_EN.match(rest)
     if m:
         return {'type': 'loot', 'looter': 'Du', 'item_id': int(m.group('item_id')),
@@ -1360,6 +1495,16 @@ class EncounterManager:
         self.pet_owners = {}
         # Sticky fallback class for dual-account mode - see _resolve_self_identity.
         self._last_self_class = None
+        # Abyss Point tracking - deliberately separate from session/current/history above: AP is a
+        # whole-raid-night running total that must survive individual pull resets (10 min idle,
+        # party join, teleport all finalize `current` constantly during a siege), so it only ever
+        # resets via the AP tab's own dedicated Reset. Chat.log only ever reports the log owner's
+        # OWN AP gains (STR_MSG_COMBAT_MY_ABYSS_POINT_GAIN has no other-player equivalent, unlike
+        # loot) - see aion_ap_tracking memory - so there is no per-player breakdown, only a total.
+        self.ap_total = 0
+        self.ap_raid_mode = False
+        self.ap_current_fortress = None
+        self.ap_fortress_totals = {}  # fortress name -> ap amount, only accumulated while raid mode is on
 
     def _resolve_self_identity(self, name, skill):
         """Opt-in (Settings.dual_account_mode): splits the single 'Du' self-identity into per-
@@ -1399,6 +1544,12 @@ class EncounterManager:
                 self.session.add_loot(looter, ev['item_id'], ev['qty'], t)
                 if self.current is not None:
                     self.current.add_loot(looter, ev['item_id'], ev['qty'], t)
+                return
+            if ev['type'] == 'ap_gain':
+                self.ap_total += ev['amount']
+                if self.ap_raid_mode and self.ap_current_fortress:
+                    self.ap_fortress_totals[self.ap_current_fortress] = (
+                        self.ap_fortress_totals.get(self.ap_current_fortress, 0) + ev['amount'])
                 return
             if ev['type'] == 'damage':
                 ev['attacker'] = self.pet_owners.get(ev['attacker'], ev['attacker'])
@@ -1446,6 +1597,29 @@ class EncounterManager:
             self.session = Encounter(label=tr('total_session'))
             self.current = None
             self.history = []
+
+    def set_raid_mode(self, active):
+        with self.lock:
+            self.ap_raid_mode = active
+
+    def set_current_fortress(self, name):
+        with self.lock:
+            self.ap_current_fortress = name or None
+
+    def reset_ap(self):
+        with self.lock:
+            self.ap_total = 0
+            self.ap_fortress_totals = {}
+            self.ap_current_fortress = None
+            self.ap_raid_mode = False
+
+    def get_ap_state(self):
+        with self.lock:
+            return {
+                'total': self.ap_total, 'raid_mode': self.ap_raid_mode,
+                'current_fortress': self.ap_current_fortress,
+                'fortress_totals': dict(self.ap_fortress_totals),
+            }
 
     def get_labels(self):
         with self.lock:
@@ -1751,8 +1925,9 @@ class LootList:
     # header stays visually aligned either way.
     SCROLLBAR_GUTTER_PX = 16
 
-    def __init__(self, parent, fonts):
+    def __init__(self, parent, fonts, on_item_click=None):
         self.fonts = fonts
+        self.on_item_click = on_item_click
         # Header lives in its own non-scrolling frame stacked above the scroll area (instead of
         # being row 0 *inside* the CTkScrollableFrame, as it used to be) so it stays put ("fixed")
         # once there's enough loot that the row list actually scrolls.
@@ -1841,6 +2016,10 @@ class LootList:
                                          text_color=color, anchor='w')
                 qty_lbl = ctk.CTkLabel(self.scroll, text=fmt_num(qty), font=self.fonts['ui'],
                                         text_color=COL_INK_PRIMARY, anchor='e')
+                if self.on_item_click:
+                    item_lbl.configure(cursor='hand2')
+                    item_lbl.bind('<Button-1>', lambda e, iid=key[1], nm=item, cl=color:
+                                  self.on_item_click(iid, nm, cl))
                 name_lbl.grid(row=i, column=0, sticky='ew', **pad)
                 item_lbl.grid(row=i, column=1, sticky='ew', **pad)
                 qty_lbl.grid(row=i, column=2, sticky='ew', **pad)
@@ -1860,6 +2039,66 @@ class LootList:
         if changed and self.sort_mode == 'chrono':
             self.scroll.update_idletasks()
             self.scroll._parent_canvas.yview_moveto(1.0)
+
+
+class ApFortressList:
+    """Per-fortress AP breakdown, shown on the Abysspunkte tab. Rows are created once per fortress
+    and updated in place (same reasoning as LootList/MeterList - avoids the recreate-every-tick
+    flicker). Unlike LootList this skips the sticky-header/scrollbar-gutter treatment: raid nights
+    realistically touch a handful of fortresses at most, so the list is short enough to never need
+    scrolling in practice."""
+
+    def __init__(self, parent, fonts):
+        self.fonts = fonts
+        self.scroll = ctk.CTkScrollableFrame(parent, fg_color=COL_SURFACE, corner_radius=12,
+                                              scrollbar_fg_color=COL_SURFACE,
+                                              scrollbar_button_color=COL_TRACK_HOVER,
+                                              scrollbar_button_hover_color=COL_ACCENT)
+        self.scroll.columnconfigure(0, weight=3)
+        self.scroll.columnconfigure(1, weight=1)
+        self.rows = {}  # fortress name -> (name_lbl, ap_lbl)
+        self.empty_label = ctk.CTkLabel(self.scroll, text=tr('no_data_view'),
+                                         text_color=COL_INK_MUTED, font=fonts['sub'])
+        pad = {'padx': 12, 'pady': (8, 4)}
+        ctk.CTkLabel(self.scroll, text=tr('fortress_col_name'), font=fonts['sub'],
+                     text_color=COL_INK_MUTED, anchor='w').grid(row=0, column=0, sticky='ew', **pad)
+        ctk.CTkLabel(self.scroll, text=tr('fortress_col_ap'), font=fonts['sub'],
+                     text_color=COL_INK_MUTED, anchor='e').grid(row=0, column=1, sticky='ew', **pad)
+
+    def pack(self, **kw):
+        self.scroll.pack(**kw)
+
+    def render(self, totals):
+        """totals: {fortress_name: ap_amount}"""
+        ordered = sorted(totals.items(), key=lambda x: -x[1])
+        pad = {'padx': 12, 'pady': 3}
+        seen = set()
+        for i, (name, ap) in enumerate(ordered, start=1):
+            seen.add(name)
+            if name in self.rows:
+                name_lbl, ap_lbl = self.rows[name]
+                ap_lbl.configure(text=fmt_num(ap))
+                name_lbl.grid_configure(row=i)
+                ap_lbl.grid_configure(row=i)
+            else:
+                name_lbl = ctk.CTkLabel(self.scroll, text=name, font=self.fonts['ui'],
+                                         text_color=COL_INK_PRIMARY, anchor='w')
+                ap_lbl = ctk.CTkLabel(self.scroll, text=fmt_num(ap), font=self.fonts['ui'],
+                                       text_color=COL_ACCENT, anchor='e')
+                name_lbl.grid(row=i, column=0, sticky='ew', **pad)
+                ap_lbl.grid(row=i, column=1, sticky='ew', **pad)
+                self.rows[name] = (name_lbl, ap_lbl)
+
+        stale = [k for k in self.rows if k not in seen]
+        for k in stale:
+            for w in self.rows[k]:
+                w.destroy()
+            del self.rows[k]
+
+        if not totals:
+            self.empty_label.grid(row=1, column=0, columnspan=2, pady=20)
+            return
+        self.empty_label.grid_forget()
 
 
 class MonsterDropdown:
@@ -1904,6 +2143,104 @@ class MonsterDropdown:
     def _on_change(self, label):
         self.selected = self.label_to_key.get(label)
         self.on_select(self.selected)
+
+
+class ItemInfoPopup:
+    """Opened by clicking an item name in the Loottable. Live-fetches item details from Aion Codex
+    on a background thread (network I/O must never block the Tk main loop - see fetch_item_info)
+    and renders once the fetch completes. winfo_exists() guards every UI touch after the fetch,
+    since the user can close the popup before a slow/offline fetch ever returns. Uses a normal
+    CTkToplevel, not a transient/override-redirect popup - see tkinter_popup_reliability memory
+    for why those proved unreliable in this app."""
+
+    ICON_SIZE = 48
+
+    def __init__(self, root, fonts, item_id, item_name, color):
+        self.fonts = fonts
+        self.color = color
+        self.top = ctk.CTkToplevel(root)
+        self.top.title(item_name)
+        self.top.geometry('380x580')
+        self.top.configure(fg_color=COL_PAGE)
+        self.top.minsize(320, 320)
+        self.top.lift()
+        self.top.focus_force()
+
+        self.body = ctk.CTkScrollableFrame(self.top, fg_color=COL_SURFACE, corner_radius=12)
+        self.body.pack(fill='both', expand=True, padx=16, pady=16)
+        self.body.columnconfigure(0, weight=1)
+        self.body.columnconfigure(1, weight=1)
+
+        self.status_label = ctk.CTkLabel(self.body, text=tr('item_popup_loading'),
+                                          font=fonts['ui'], text_color=COL_INK_MUTED)
+        self.status_label.grid(row=0, column=0, columnspan=2, pady=60)
+
+        threading.Thread(target=self._fetch_worker, args=(item_id,), daemon=True).start()
+
+    def _fetch_worker(self, item_id):
+        info = fetch_item_info(item_id)
+        try:
+            self.top.after(0, lambda: self._render(info))
+        except Exception:
+            pass  # popup was already closed before the fetch came back
+
+    def _render(self, info):
+        if not self.top.winfo_exists():
+            return
+        self.status_label.destroy()
+        if info is None:
+            ctk.CTkLabel(self.body, text=tr('item_popup_error'), font=self.fonts['ui'],
+                         text_color=COL_DANGER, wraplength=300, justify='left'
+                         ).grid(row=0, column=0, columnspan=2, pady=40, padx=16)
+            return
+
+        row = 0
+        header = ctk.CTkFrame(self.body, fg_color='transparent')
+        header.grid(row=row, column=0, columnspan=2, sticky='ew', padx=12, pady=(12, 8))
+        row += 1
+        if info['icon_bytes']:
+            try:
+                pil_img = Image.open(io.BytesIO(info['icon_bytes'])).convert('RGBA')
+                pil_img = pil_img.resize((self.ICON_SIZE, self.ICON_SIZE), Image.LANCZOS)
+                self._icon_ref = ctk.CTkImage(light_image=pil_img, dark_image=pil_img,
+                                               size=(self.ICON_SIZE, self.ICON_SIZE))
+                ctk.CTkLabel(header, image=self._icon_ref, text='').pack(side='left', padx=(0, 12))
+            except Exception:
+                pass
+        ctk.CTkLabel(header, text=info['name'], font=self.fonts['name'], text_color=self.color,
+                     anchor='w', justify='left', wraplength=260).pack(side='left', fill='x', expand=True)
+
+        if info['detail_lines']:
+            ctk.CTkLabel(self.body, text='\n'.join(info['detail_lines']), font=self.fonts['sub'],
+                         text_color=COL_INK_SECONDARY, justify='left', anchor='w', wraplength=320
+                         ).grid(row=row, column=0, columnspan=2, sticky='ew', padx=12, pady=(0, 8))
+            row += 1
+
+        for stat_name, stat_value in info['stats']:
+            ctk.CTkLabel(self.body, text=stat_name, font=self.fonts['ui'],
+                         text_color=COL_INK_SECONDARY, anchor='w'
+                         ).grid(row=row, column=0, sticky='w', padx=12, pady=2)
+            ctk.CTkLabel(self.body, text=stat_value, font=self.fonts['ui'],
+                         text_color=COL_INK_PRIMARY, anchor='e'
+                         ).grid(row=row, column=1, sticky='e', padx=12, pady=2)
+            row += 1
+
+        if info['price']:
+            buy, sell = info['price']
+            ctk.CTkLabel(self.body, text=f"{tr('item_popup_buy')}: {buy}   {tr('item_popup_sell')}: {sell}",
+                         font=self.fonts['sub'], text_color=COL_INK_MUTED, anchor='w'
+                         ).grid(row=row, column=0, columnspan=2, sticky='w', padx=12, pady=(8, 0))
+            row += 1
+
+        ctk.CTkLabel(self.body, text=tr('item_popup_stock_disclaimer'), font=self.fonts['sub'],
+                     text_color=COL_INK_MUTED, anchor='w', justify='left', wraplength=320
+                     ).grid(row=row, column=0, columnspan=2, sticky='ew', padx=12, pady=(16, 8))
+        row += 1
+
+        ctk.CTkButton(self.body, text=tr('item_popup_open_browser'), font=self.fonts['ui'],
+                      fg_color=COL_TRACK, hover_color=COL_TRACK_HOVER, text_color=COL_INK_PRIMARY,
+                      command=lambda: webbrowser.open(info['url'])
+                      ).grid(row=row, column=0, columnspan=2, pady=(4, 12))
 
 
 class SettingsWindow:
@@ -2209,9 +2546,11 @@ class MeterApp:
         self.tab_damage_name = tr('tab_damage')
         self.tab_heal_name = tr('tab_heal')
         self.tab_loot_name = tr('tab_loot')
+        self.tab_ap_name = tr('tab_ap')
         self.tabview.add(self.tab_damage_name)
         self.tabview.add(self.tab_heal_name)
         self.tabview.add(self.tab_loot_name)
+        self.tabview.add(self.tab_ap_name)
 
         dmg_tab = self.tabview.tab(self.tab_damage_name)
         filter_row = ctk.CTkFrame(dmg_tab, fg_color='transparent')
@@ -2232,8 +2571,49 @@ class MeterApp:
         self.heal_list.pack(fill='both', expand=True, padx=2, pady=2)
 
         loot_tab = self.tabview.tab(self.tab_loot_name)
-        self.loot_list = LootList(loot_tab, self.fonts)
+        self.loot_list = LootList(loot_tab, self.fonts, on_item_click=self.on_item_click)
         self.loot_list.pack(fill='both', expand=True, padx=2, pady=2)
+
+        ap_tab = self.tabview.tab(self.tab_ap_name)
+        ap_top = ctk.CTkFrame(ap_tab, fg_color='transparent')
+        ap_top.pack(fill='x', padx=2, pady=(0, 4))
+        ap_card = ctk.CTkFrame(ap_top, fg_color=COL_TRACK, corner_radius=12)
+        ap_card.pack(side='left', fill='x', expand=True)
+        ctk.CTkLabel(ap_card, text=tr('ap_total_label'), font=self.fonts['caption'],
+                     text_color=COL_INK_MUTED).pack(anchor='w', padx=14, pady=(10, 0))
+        self.ap_total_value = ctk.CTkLabel(ap_card, text='0', font=self.fonts['stat_value'],
+                                            text_color=COL_INK_PRIMARY)
+        self.ap_total_value.pack(anchor='w', padx=14, pady=(0, 10))
+        ctk.CTkButton(ap_top, text=tr('ap_reset_button'), width=110, height=32, corner_radius=8,
+                      fg_color=COL_TRACK, hover_color=COL_DANGER, text_color=COL_INK_PRIMARY,
+                      font=self.fonts['ui'], command=self.on_reset_ap).pack(side='left', padx=(8, 0))
+
+        ctk.CTkLabel(ap_tab, text=tr('ap_self_only_hint'), font=self.fonts['sub'],
+                     text_color=COL_INK_MUTED, anchor='w').pack(fill='x', padx=4, pady=(0, 8))
+
+        raid_row = ctk.CTkFrame(ap_tab, fg_color='transparent')
+        raid_row.pack(fill='x', padx=2, pady=(0, 8))
+        self.raid_mode_btn = ctk.CTkButton(raid_row, text=tr('raid_mode_start'), width=150, height=32,
+                                            corner_radius=8, fg_color=COL_TRACK, hover_color=COL_TRACK_HOVER,
+                                            text_color=COL_INK_PRIMARY, font=self.fonts['ui'],
+                                            command=self.on_toggle_raid_mode)
+        self.raid_mode_btn.pack(side='left')
+        self.fortress_frame = ctk.CTkFrame(raid_row, fg_color='transparent')
+        ctk.CTkLabel(self.fortress_frame, text=tr('fortress_label'), font=self.fonts['ui'],
+                     text_color=COL_INK_SECONDARY).pack(side='left', padx=(16, 8))
+        self.fortress_combo = ctk.CTkComboBox(self.fortress_frame, values=self.settings.known_fortresses,
+                                               width=240, height=32, corner_radius=8,
+                                               fg_color=COL_TRACK, border_color=COL_BORDER,
+                                               button_color=COL_TRACK, button_hover_color=COL_ACCENT,
+                                               dropdown_fg_color=COL_TRACK, dropdown_hover_color=COL_ACCENT,
+                                               text_color=COL_INK_PRIMARY, font=self.fonts['ui'],
+                                               command=self.on_fortress_selected)
+        self.fortress_combo.set('')
+        self.fortress_combo.pack(side='left')
+        # fortress_frame is only packed while raid mode is active - see on_toggle_raid_mode
+
+        self.ap_fortress_list = ApFortressList(ap_tab, self.fonts)
+        self.ap_fortress_list.pack(fill='both', expand=True, padx=2, pady=2)
 
         # --- status bar ---
         status = ctk.CTkFrame(root, fg_color=COL_PAGE, corner_radius=0)
@@ -2248,6 +2628,40 @@ class MeterApp:
 
     def on_reset(self):
         self.manager.reset_all()
+
+    def on_toggle_raid_mode(self):
+        active = not self.manager.get_ap_state()['raid_mode']
+        self.manager.set_raid_mode(active)
+        if active:
+            self.raid_mode_btn.configure(text=tr('raid_mode_stop'), fg_color=COL_ACCENT)
+            self.fortress_frame.pack(side='left')
+            # CTkComboBox has no placeholder_text option (unlike CTkEntry) - fake one by pre-
+            # filling the entry, but only if nothing's actually selected yet, so resuming raid
+            # mode with an already-picked fortress doesn't stomp on it.
+            if not self.manager.get_ap_state()['current_fortress']:
+                self.fortress_combo.set(tr('fortress_placeholder'))
+        else:
+            self.raid_mode_btn.configure(text=tr('raid_mode_start'), fg_color=COL_TRACK)
+            self.fortress_frame.pack_forget()
+
+    def on_fortress_selected(self, value):
+        value = (value or '').strip()
+        if not value or value == tr('fortress_placeholder'):
+            return
+        if value not in self.settings.known_fortresses:
+            self.settings.add_fortress(value)
+            self.fortress_combo.configure(values=self.settings.known_fortresses)
+        self.manager.set_current_fortress(value)
+        self.fortress_combo.set(value)
+
+    def on_reset_ap(self):
+        self.manager.reset_ap()
+        self.raid_mode_btn.configure(text=tr('raid_mode_start'), fg_color=COL_TRACK)
+        self.fortress_frame.pack_forget()
+        self.fortress_combo.set('')
+
+    def on_item_click(self, item_id, item_name, color):
+        ItemInfoPopup(self.root, self.fonts, item_id, item_name, color)
 
     def on_open_settings(self):
         SettingsWindow(self.root, self.settings, self.fonts, self.known_players,
@@ -2351,6 +2765,7 @@ class MeterApp:
             self.heal_list.render([], tr('unit_heal'), 'HPS')
 
         self.render_loot()
+        self.render_ap()
 
         self.status_label.configure(
             text=f"{self.manager.log_status}   \u00b7   {tr('lines_processed', n=fmt_num(self.manager.lines_processed))}"
@@ -2433,6 +2848,11 @@ class MeterApp:
                 key = (looter, item_id)
                 entries.append((key, display, name, qty, source, last_t, color))
         self.loot_list.render(entries)
+
+    def render_ap(self):
+        state = self.manager.get_ap_state()
+        self.ap_total_value.configure(text=fmt_num(state['total']))
+        self.ap_fortress_list.render(state['fortress_totals'])
 
 
 def main():
