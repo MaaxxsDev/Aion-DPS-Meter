@@ -18,7 +18,7 @@ from tkinter import filedialog
 import customtkinter as ctk
 from PIL import Image, ImageDraw, ImageTk
 
-APP_VERSION = '1.5.1'
+APP_VERSION = '1.5.2'
 GITHUB_REPO = 'MaaxxsDev/Aion-DPS-Meter'
 GITHUB_API_LATEST = f'https://api.github.com/repos/{GITHUB_REPO}/releases/latest'
 
@@ -370,6 +370,7 @@ STRINGS = {
         'stat_dps': 'Raid-DPS', 'stat_heal': 'Gesamtheilung',
         'tab_damage': 'Schaden', 'tab_heal': 'Heilung', 'tab_loot': 'Loottable', 'tab_ap': 'Abysspunkte',
         'loot_col_player': 'Spieler', 'loot_col_item': 'Item', 'loot_col_qty': 'Menge',
+        'kinah_total_label': 'Gesammeltes Kinah',
         'ap_total_label': 'Gesamt Abysspunkte', 'ap_reset_button': 'AP zurücksetzen',
         'raid_mode_start': 'Raidmodus starten', 'raid_mode_stop': 'Raidmodus beenden',
         'fortress_label': 'Festung:', 'fortress_placeholder': 'Festung wählen oder eingeben',
@@ -445,6 +446,7 @@ STRINGS = {
         'stat_dps': 'Raid DPS', 'stat_heal': 'Total Healing',
         'tab_damage': 'Damage', 'tab_heal': 'Healing', 'tab_loot': 'Loot Table', 'tab_ap': 'Abyss Points',
         'loot_col_player': 'Player', 'loot_col_item': 'Item', 'loot_col_qty': 'Qty',
+        'kinah_total_label': 'Kinah Earned',
         'ap_total_label': 'Total Abyss Points', 'ap_reset_button': 'Reset AP',
         'raid_mode_start': 'Start Raid Mode', 'raid_mode_stop': 'Stop Raid Mode',
         'fortress_label': 'Fortress:', 'fortress_placeholder': 'Select or type a fortress',
@@ -1080,6 +1082,22 @@ def fetch_item_info(item_id):
             'icon_bytes': icon_bytes, 'url': url}
 
 
+KINAH_ICON_URL = 'https://aioncodex.com/images/kinah.png'
+
+
+def fetch_kinah_icon():
+    """Fetches the real Kinah currency icon from Aion Codex (same source/reasoning as item icons
+    in ItemInfoPopup - a single small, static, universal icon, so unlike item names this isn't
+    worth persisting to disk, just re-fetched once in the background per app run). Returns raw PNG
+    bytes, or None on any failure - same never-raise contract as fetch_item_info()."""
+    try:
+        req = urllib.request.Request(KINAH_ICON_URL, headers={'User-Agent': 'AionDPSMeter/' + APP_VERSION})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            return resp.read()
+    except Exception:
+        return None
+
+
 # Live auto-resolution for items missing from BOTH CONFIRMED_ITEM_NAMES and the bundled bulk table
 # (item_names.json covers ~86% of items - the rest, plus any genuinely OriginAion-only custom ID,
 # show as the raw "Item #12345" fallback). Fills those in automatically using the same Aion Codex
@@ -1187,6 +1205,12 @@ ITEM_USE_RE_DE = re.compile(r'^Ihr habt "(?P<item>[^"]+)" benutzt\.')
 # exactly that self/other split) - so this can only ever track the log owner's own AP, never other
 # party members'. See aion_ap_tracking memory.
 AP_GAIN_RE_DE = re.compile(r'^Ihr habt (?P<amount>[0-9]+(?:\.[0-9]{3})*) Abyss-Punkte erhalten\.')
+# Kinah gain (STR_MSG_GETMONEY, id 1380001: "Ihr habt %num0 Kinah erhalten.") - same self-only
+# shape as AP gain (STR_MSG_GETMONEY sits right next to the AP-gain message_type range in the
+# string table too), no other-player equivalent found. Deliberately does NOT match
+# STR_MSG_USEMONEY ("Ihr zahlt %num0 Kinah.", spending) or the refund/poll-reward variants, which
+# use different verbs entirely.
+KINAH_GAIN_RE_DE = re.compile(r'^Ihr habt (?P<amount>[0-9]+(?:\.[0-9]{3})*) Kinah erhalten\.')
 # Loot (STR_GET_ITEM/STR_MSG_GET_ITEM_PARTYNOTICE both render as "X hat/habt Y erhalten." - but
 # so do many unrelated messages (mail, EXP, Abyss Points, buff effects) that share the exact same
 # sentence shape. The angle-bracket <Item> the user first saw is only the in-game *rendering* of
@@ -1257,6 +1281,9 @@ def parse_line_de(rest, crit):
     m = AP_GAIN_RE_DE.match(rest)
     if m:
         return {'type': 'ap_gain', 'amount': parse_amount_de(m.group('amount'))}
+    m = KINAH_GAIN_RE_DE.match(rest)
+    if m:
+        return {'type': 'kinah_gain', 'amount': parse_amount_de(m.group('amount'))}
     m = LOOT_SELF_RE_DE.match(rest)
     if m:
         return {'type': 'loot', 'looter': 'Du', 'item_id': int(m.group('item_id')),
@@ -1321,6 +1348,9 @@ ITEM_USE_RE_EN = re.compile(r'^You have used (?P<item>.+?)\.$')
 # Abyss Point gain - client string 1320000, "You have gained %num0 Abyss Points." (verified
 # alongside the German "Ihr habt %num0 Abyss-Punkte erhalten." - both self only, see AP_GAIN_RE_DE).
 AP_GAIN_RE_EN = re.compile(r'^You have gained (?P<amount>[0-9]+(?:,[0-9]{3})*) Abyss Points\.')
+# Kinah gain - client string 1380001, "You have earned %num0 Kinah." (verified alongside the German
+# "Ihr habt %num0 Kinah erhalten." - both self only, see KINAH_GAIN_RE_DE).
+KINAH_GAIN_RE_EN = re.compile(r'^You have earned (?P<amount>[0-9]+(?:,[0-9]{3})*) Kinah\.')
 # Loot - "[item:186000051;ver6;;;;]" (unresolved item template ID) was confirmed from a real
 # German raw log line; assumed to carry over unchanged to English since it's a raw data tag the
 # client embeds, not translated text - the surrounding sentence differs by language but this tag
@@ -1398,6 +1428,9 @@ def parse_line_en(rest, crit):
     m = AP_GAIN_RE_EN.match(rest)
     if m:
         return {'type': 'ap_gain', 'amount': parse_amount_en(m.group('amount'))}
+    m = KINAH_GAIN_RE_EN.match(rest)
+    if m:
+        return {'type': 'kinah_gain', 'amount': parse_amount_en(m.group('amount'))}
     m = LOOT_SELF_RE_EN.match(rest)
     if m:
         return {'type': 'loot', 'looter': 'Du', 'item_id': int(m.group('item_id')),
@@ -1439,6 +1472,7 @@ class Encounter:
         self.heal_events = []
         self.loot_totals = {}  # looter name -> {item_id: (quantity, last_touched_t)} - name
         # resolved at render time; last_touched_t drives the newest-at-the-bottom feed ordering.
+        self.kinah_total = 0
         self._summary_cache = None
 
     def add_damage(self, ev, t):
@@ -1459,6 +1493,9 @@ class Encounter:
         items = self.loot_totals.setdefault(looter, {})
         prev_qty, _ = items.get(item_id, (0, 0))
         items[item_id] = (prev_qty + qty, t)
+
+    def add_kinah(self, amount, t):
+        self.kinah_total += amount
 
     def duration(self):
         if self.start is None:
@@ -1613,6 +1650,14 @@ class EncounterManager:
                 self.session.add_loot(looter, ev['item_id'], ev['qty'], t)
                 if self.current is not None:
                     self.current.add_loot(looter, ev['item_id'], ev['qty'], t)
+                return
+            if ev['type'] == 'kinah_gain':
+                # Same lifecycle as item loot (both are loot-adjacent, both live on Gesamt-Sitzung
+                # and clear together with it on manual Reset/party-join/teleport/idle) - NOT the
+                # same lifecycle as AP, which deliberately survives all of those.
+                self.session.add_kinah(ev['amount'], t)
+                if self.current is not None:
+                    self.current.add_kinah(ev['amount'], t)
                 return
             if ev['type'] == 'ap_gain':
                 self.ap_total += ev['amount']
@@ -2640,6 +2685,20 @@ class MeterApp:
         self.heal_list.pack(fill='both', expand=True, padx=2, pady=2)
 
         loot_tab = self.tabview.tab(self.tab_loot_name)
+        kinah_card = ctk.CTkFrame(loot_tab, fg_color=COL_TRACK, corner_radius=12)
+        kinah_card.pack(fill='x', padx=2, pady=(0, 8))
+        ctk.CTkLabel(kinah_card, text=tr('kinah_total_label'), font=self.fonts['caption'],
+                     text_color=COL_INK_MUTED).pack(anchor='w', padx=14, pady=(10, 0))
+        kinah_value_row = ctk.CTkFrame(kinah_card, fg_color='transparent')
+        kinah_value_row.pack(anchor='w', padx=14, pady=(0, 10))
+        self.kinah_icon_label = ctk.CTkLabel(kinah_value_row, text='')
+        self.kinah_icon_label.pack(side='left', padx=(0, 6))
+        self.kinah_value_label = ctk.CTkLabel(kinah_value_row, text='0', font=self.fonts['stat_value'],
+                                               text_color=COL_INK_PRIMARY)
+        self.kinah_value_label.pack(side='left')
+        self._kinah_icon_ref = None
+        threading.Thread(target=self._fetch_kinah_icon_worker, daemon=True).start()
+
         self.loot_list = LootList(loot_tab, self.fonts, on_item_click=self.on_item_click)
         self.loot_list.pack(fill='both', expand=True, padx=2, pady=2)
 
@@ -2731,6 +2790,24 @@ class MeterApp:
 
     def on_item_click(self, item_id, item_name, color):
         ItemInfoPopup(self.root, self.fonts, item_id, item_name, color)
+
+    def _fetch_kinah_icon_worker(self):
+        data = fetch_kinah_icon()
+        try:
+            self.root.after(0, lambda: self._set_kinah_icon(data))
+        except Exception:
+            pass  # app was already closed before the fetch came back
+
+    def _set_kinah_icon(self, data):
+        if data is None or not self.kinah_icon_label.winfo_exists():
+            return
+        try:
+            pil_img = Image.open(io.BytesIO(data)).convert('RGBA')
+            pil_img = pil_img.resize((22, 24), Image.LANCZOS)
+            self._kinah_icon_ref = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(22, 24))
+            self.kinah_icon_label.configure(image=self._kinah_icon_ref)
+        except Exception:
+            pass
 
     def on_open_settings(self):
         SettingsWindow(self.root, self.settings, self.fonts, self.known_players,
@@ -2917,6 +2994,7 @@ class MeterApp:
                 key = (looter, item_id)
                 entries.append((key, display, name, qty, source, last_t, color))
         self.loot_list.render(entries)
+        self.kinah_value_label.configure(text=fmt_num(self.manager.session.kinah_total))
 
     def render_ap(self):
         state = self.manager.get_ap_state()
