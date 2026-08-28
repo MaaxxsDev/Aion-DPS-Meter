@@ -18,7 +18,7 @@ from tkinter import filedialog
 import customtkinter as ctk
 from PIL import Image, ImageDraw, ImageTk
 
-APP_VERSION = '1.5.2'
+APP_VERSION = '1.6.0'
 GITHUB_REPO = 'MaaxxsDev/Aion-DPS-Meter'
 GITHUB_API_LATEST = f'https://api.github.com/repos/{GITHUB_REPO}/releases/latest'
 
@@ -158,14 +158,14 @@ CLASS_COLORS = {
 
 
 def class_labels():
-    """code -> localized display label, plus the 'unknown' fallback, for the current language."""
-    labels = dict(CLASS_LABELS_BY_LANG.get(current_lang(), CLASS_LABELS_BY_LANG['de']))
+    """code -> localized display label, plus the 'unknown' fallback, for the current LAUNCHER
+    language - this produces UI-facing text (e.g. the "(Templer)" dual-account suffix shown in row
+    labels), so it must follow the launcher language, not the game/log language, or a user running
+    a different launcher language than game language would see a language mix in exactly the kind
+    of place this project has gone out of its way to keep consistent."""
+    labels = dict(CLASS_LABELS_BY_LANG.get(current_launcher_lang(), CLASS_LABELS_BY_LANG['de']))
     labels['unknown'] = tr('unknown_class')
     return labels
-
-
-def code_by_label():
-    return {label: code for code, label in class_labels().items()}
 
 
 def _icon_outline(img, px=3, color=(0, 0, 0, 255)):
@@ -215,12 +215,18 @@ DEFAULT_FORTRESSES = [
 
 
 class Settings:
-    """Persists log path, the user's own character name, language, and per-player class assignments.
+    """Persists log path, the user's own character name, and language.
+
+    Game language and launcher language are two independent settings - game language selects the
+    Chat.log parsing/detection rules (must match the client's actual language) and takes effect on
+    the very next log line, no restart needed; launcher language selects the app's own UI text
+    (STRINGS/tr()) and needs a restart to relabel widgets already drawn on screen. They're often the
+    same value but don't have to be - see aion_launcher_language memory.
 
     An optional profile keeps a second, fully separate settings file (own log path, character
-    name, class assignments) - for dual-boxing, where two game clients write into two separate
-    Chat.log files and each needs its own identity, launch a second instance with a profile name
-    as the second command-line argument so the two don't share (and overwrite) one settings file.
+    name, language) - for dual-boxing, where two game clients write into two separate Chat.log
+    files and each needs its own identity, launch a second instance with a profile name as the
+    second command-line argument so the two don't share (and overwrite) one settings file.
     """
 
     def __init__(self, profile=None):
@@ -230,20 +236,20 @@ class Settings:
             folder = f'AionDPSMeter_{safe}'
         self.settings_file = os.path.join(user_data_dir(folder), 'settings.json')
         self.data = {'log_path': DEFAULT_LOG_PATH, 'character_name': '', 'language': 'de',
-                     'dual_account_mode': False, 'hide_npcs': False, 'classes': {},
+                     'launcher_language': 'de', 'dual_account_mode': False, 'hide_npcs': False,
                      'known_fortresses': list(DEFAULT_FORTRESSES)}
         try:
             with open(self.settings_file, 'r', encoding='utf-8') as f:
                 loaded = json.load(f)
             self.data.update({k: v for k, v in loaded.items() if k in self.data})
-            if 'classes' in loaded and isinstance(loaded['classes'], dict):
-                self.data['classes'] = loaded['classes']
             if 'known_fortresses' in loaded and isinstance(loaded['known_fortresses'], list):
                 self.data['known_fortresses'] = [str(x) for x in loaded['known_fortresses']]
         except Exception:
             pass
         if self.data.get('language') not in ('de', 'en'):
             self.data['language'] = 'de'
+        if self.data.get('launcher_language') not in ('de', 'en'):
+            self.data['launcher_language'] = 'de'
 
     def _save(self):
         try:
@@ -263,6 +269,10 @@ class Settings:
     @property
     def language(self):
         return self.data.get('language', 'de')
+
+    @property
+    def launcher_language(self):
+        return self.data.get('launcher_language', 'de')
 
     @property
     def dual_account_mode(self):
@@ -288,6 +298,10 @@ class Settings:
         self.data['language'] = lang if lang in ('de', 'en') else 'de'
         self._save()
 
+    def set_launcher_language(self, lang):
+        self.data['launcher_language'] = lang if lang in ('de', 'en') else 'de'
+        self._save()
+
     def set_dual_account_mode(self, enabled):
         self.data['dual_account_mode'] = bool(enabled)
         self._save()
@@ -303,18 +317,15 @@ class Settings:
         self.data['known_fortresses'].append(name)
         self._save()
 
-    def get_class(self, name):
-        return self.data['classes'].get(name, 'unknown')
 
-    def set_class(self, name, code):
-        self.data['classes'][name] = code
-        self._save()
-
-
-# Resolves UI text and parsing/detection language at runtime. Set once in main() to the live
-# Settings instance - tr() always reads settings.language fresh, so backend logic (parsing,
-# status text, dropdown labels rebuilt every refresh cycle) reacts immediately to a language
-# change, while widget text already drawn on screen needs an app restart to relabel itself.
+# Two independent language settings, resolved at runtime, set once in main() to the live Settings
+# instance. current_lang() (Settings.language, "Spielsprache") drives Chat.log parsing/detection -
+# read fresh on every parse_line() call, so a change takes effect on the very next log line, no
+# restart needed. current_launcher_lang() (Settings.launcher_language, "Launcher") drives tr()/the
+# app's own UI text - status text and dropdown labels rebuilt every refresh cycle react immediately,
+# but widget text already drawn on screen needs an app restart to relabel itself. They're
+# deliberately separate: the log parser must match the game client's language, but the user may
+# still prefer the launcher's own UI in a different language. See aion_launcher_language memory.
 _SETTINGS = None
 
 
@@ -322,15 +333,26 @@ def current_lang():
     return _SETTINGS.language if _SETTINGS is not None else 'de'
 
 
+def current_launcher_lang():
+    return _SETTINGS.launcher_language if _SETTINGS is not None else 'de'
+
+
 STRINGS = {
     'de': {
         'options': 'Optionen', 'settings_title': 'Optionen',
         'log_path_label': 'Spielpfad (Chat.log):',
         'char_name_label': 'Dein Charaktername:',
-        'language_label': 'Sprache / Spielsprache:',
-        'language_hint': 'Steuert sowohl die Programmsprache als auch die Erkennung im Chat.log '
-                          '(muss zur Spielsprache passen). Ein Neustart ist nötig, damit die '
-                          'Programmsprache überall greift.',
+        'language_label': 'Spielsprache:',
+        'language_hint': 'Steuert die Erkennung im Chat.log (muss zur tatsächlichen Sprache des '
+                          'Spielclients passen). Wirkt sofort, kein Neustart nötig.',
+        'launcher_language_label': 'Launcher-Sprache:',
+        'launcher_language_hint': 'Steuert nur die Sprache dieses Programms, unabhängig von der '
+                                   'Spielsprache oben. Ein Neustart ist nötig, damit sie überall '
+                                   'greift.',
+        'restart_required_title': 'Neustart erforderlich',
+        'restart_required_message': 'Die Launcher-Sprache wurde geändert. Starte das Programm '
+                                     'neu, damit sie überall greift.',
+        'ok_button': 'OK',
         'dual_account_label': 'Dual-Account-Modus (Beta)',
         'dual_account_hint': 'Trennt "Du" anhand des benutzten Skills in mehrere eigene Zeilen '
                               '(z.B. "Du (Templer)" / "Du (Kantor)") - für zwei gleichzeitig '
@@ -339,17 +361,12 @@ STRINGS = {
                               'erkannten Account zugerechnet. Nur aktivieren, wenn du wirklich '
                               'zwei Accounts gleichzeitig spielst - sonst wird dein eigener Schaden '
                               'unnötig aufgesplittet.',
-        'assign_classes_label': 'Klassen zuweisen:',
-        'assign_classes_hint': 'Automatisch erkannte Vorschläge sind bereits ausgewählt - nur bei '
-                                'Bedarf ändern. Manuelle Auswahl hat immer Vorrang.',
-        'no_players_yet': 'Noch keine Spieler erkannt - starte einen Kampf.',
         'save_close': 'Speichern & Schließen',
         'cancel': 'Abbrechen',
         'check_updates': 'Nach Updates suchen (v{version})',
         'choose_log_title': 'Chat.log auswählen',
         'log_file_filter': 'Log-Datei',
         'all_files_filter': 'Alle Dateien',
-        'you_suffix': ' (Du)',
         'unknown_class': 'Unbekannt',
         'update_available_title': 'Update verfügbar',
         'update_available_new': 'Neue Version verfügbar: {version}',
@@ -403,10 +420,17 @@ STRINGS = {
         'options': 'Settings', 'settings_title': 'Settings',
         'log_path_label': 'Game path (Chat.log):',
         'char_name_label': 'Your character name:',
-        'language_label': 'Language / Game language:',
-        'language_hint': 'Controls both the program language and the Chat.log detection (must '
-                          'match your game’s language). Restart the app for the program '
-                          'language to apply everywhere.',
+        'language_label': 'Game language:',
+        'language_hint': 'Controls the Chat.log detection (must match your game client\'s actual '
+                          'language). Applies immediately, no restart needed.',
+        'launcher_language_label': 'Launcher language:',
+        'launcher_language_hint': 'Controls only this program\'s own language, independent of the '
+                                   'game language above. Restart the app for it to apply '
+                                   'everywhere.',
+        'restart_required_title': 'Restart Required',
+        'restart_required_message': 'The launcher language has been changed. Restart the app '
+                                     'for it to apply everywhere.',
+        'ok_button': 'OK',
         'dual_account_label': 'Dual-account mode (Beta)',
         'dual_account_hint': 'Splits "Du" into several rows based on the skill used '
                               '(e.g. "Du (Templar)" / "Du (Chanter)") - for two accounts played '
@@ -415,17 +439,12 @@ STRINGS = {
                               'account was detected most recently. Only enable this if you\'re '
                               'really playing two accounts at once - otherwise it will needlessly '
                               'split up your own damage.',
-        'assign_classes_label': 'Assign classes:',
-        'assign_classes_hint': 'Automatically detected suggestions are already selected - only '
-                                'change if needed. A manual choice always takes priority.',
-        'no_players_yet': 'No players detected yet - start a fight.',
         'save_close': 'Save & Close',
         'cancel': 'Cancel',
         'check_updates': 'Check for updates (v{version})',
         'choose_log_title': 'Select Chat.log',
         'log_file_filter': 'Log file',
         'all_files_filter': 'All files',
-        'you_suffix': ' (You)',
         'unknown_class': 'Unknown',
         'update_available_title': 'Update available',
         'update_available_new': 'New version available: {version}',
@@ -479,7 +498,7 @@ STRINGS = {
 
 
 def tr(key, **kwargs):
-    lang = current_lang()
+    lang = current_launcher_lang()
     text = STRINGS.get(lang, STRINGS['de']).get(key) or STRINGS['de'].get(key, key)
     return text.format(**kwargs) if kwargs else text
 
@@ -2357,33 +2376,70 @@ class ItemInfoPopup:
                       ).grid(row=row, column=0, columnspan=2, pady=(4, 12))
 
 
+class RestartNoticeDialog:
+    """Small notice shown right after actually changing the launcher language (not the game
+    language, which needs no restart - see aion_launcher_language memory). A normal CTkToplevel,
+    never a transient popup (see tkinter_popup_reliability memory). Constructed AFTER
+    settings.set_launcher_language() has already updated the live Settings object, so the tr()
+    calls below - evaluated at construction time, same as everywhere else in this app - resolve
+    against the NEWLY selected language, not the one being left behind."""
+
+    def __init__(self, root, fonts):
+        self.top = ctk.CTkToplevel(root)
+        self.top.title(tr('restart_required_title'))
+        self.top.geometry('360x170')
+        self.top.configure(fg_color=COL_PAGE)
+        self.top.minsize(320, 150)
+        self.top.lift()
+        self.top.focus_force()
+        self.top.attributes('-topmost', True)
+
+        ctk.CTkLabel(self.top, text=tr('restart_required_message'), font=fonts['ui'],
+                     text_color=COL_INK_PRIMARY, wraplength=320, justify='left'
+                     ).pack(padx=20, pady=(20, 16), fill='both', expand=True)
+        ctk.CTkButton(self.top, text=tr('ok_button'), width=100, height=32, corner_radius=8,
+                      fg_color=COL_ACCENT, hover_color=COL_ACCENT, text_color=COL_INK_PRIMARY,
+                      font=fonts['ui'], command=self.top.destroy).pack(pady=(0, 16))
+
+
 class SettingsWindow:
     """A normal (non-popup) settings dialog - deliberately avoids tk.Menu/override-redirect
-    popups, which proved unreliable for interactive class assignment in this app."""
+    popups, which proved unreliable for interactive widgets in this app.
 
-    def __init__(self, root, settings, fonts, known_players, class_resolver, on_saved, on_check_update):
+    No manual class assignment any more - ClassGuesser's automatic detection has proven reliable
+    enough on its own (removed per direct user request, see aion_launcher_language memory)."""
+
+    def __init__(self, root, settings, fonts, on_saved, on_check_update):
+        self.root = root
         self.settings = settings
         self.fonts = fonts
-        self.class_resolver = class_resolver
         self.on_saved = on_saved
-        self.class_menus = {}
 
         self.top = ctk.CTkToplevel(root)
         self.top.title(tr('settings_title'))
-        self.top.geometry('460x760')
+        self.top.geometry('460x640')
         self.top.configure(fg_color=COL_PAGE)
-        self.top.minsize(380, 500)
+        self.top.minsize(380, 420)
         self.top.lift()
         self.top.focus_force()
 
-        pad = {'padx': 16}
+        # Body scrolls independently of the button row pinned below it - a fixed-height Toplevel
+        # with a fixed pack layout risked the button row clipping off the bottom edge (content
+        # height is no longer bounded now that the old class-assignment list is gone), and a
+        # scrollable body is robust to that regardless of exact content/window height, screen
+        # resolution, or DPI - same reasoning the old class-assignment section used a
+        # CTkScrollableFrame for, just covering the whole form now instead of just that one list.
+        self.body = ctk.CTkScrollableFrame(self.top, fg_color=COL_PAGE, corner_radius=0)
+        self.body.pack(fill='both', expand=True, side='top')
 
-        ctk.CTkLabel(self.top, text=tr('language_label'), font=fonts['ui'],
-                     text_color=COL_INK_SECONDARY).pack(anchor='w', pady=(16, 4), **pad)
+        pad = {'padx': 16}
         self.lang_options = [('de', 'Deutsch'), ('en', 'English')]
         lang_label_by_code = dict(self.lang_options)
         lang_code_by_label = {v: k for k, v in self.lang_options}
-        self.lang_menu = ctk.CTkOptionMenu(self.top, values=[v for _, v in self.lang_options],
+
+        ctk.CTkLabel(self.body, text=tr('language_label'), font=fonts['ui'],
+                     text_color=COL_INK_SECONDARY).pack(anchor='w', pady=(16, 4), **pad)
+        self.lang_menu = ctk.CTkOptionMenu(self.body, values=[v for _, v in self.lang_options],
                                             width=170, height=28, corner_radius=6,
                                             fg_color=COL_TRACK, button_color=COL_TRACK,
                                             button_hover_color=COL_ACCENT, dropdown_fg_color=COL_TRACK,
@@ -2393,12 +2449,28 @@ class SettingsWindow:
                                                 lang_code_by_label.get(label, 'de')))
         self.lang_menu.set(lang_label_by_code.get(settings.language, 'Deutsch'))
         self.lang_menu.pack(anchor='w', **pad)
-        ctk.CTkLabel(self.top, text=tr('language_hint'), font=fonts['sub'], text_color=COL_INK_MUTED,
-                     wraplength=420, justify='left').pack(anchor='w', pady=(4, 0), **pad)
+        ctk.CTkLabel(self.body, text=tr('language_hint'), font=fonts['sub'], text_color=COL_INK_MUTED,
+                     wraplength=400, justify='left').pack(anchor='w', pady=(4, 0), **pad)
 
-        ctk.CTkLabel(self.top, text=tr('log_path_label'), font=fonts['ui'],
+        ctk.CTkLabel(self.body, text=tr('launcher_language_label'), font=fonts['ui'],
                      text_color=COL_INK_SECONDARY).pack(anchor='w', pady=(14, 4), **pad)
-        path_row = ctk.CTkFrame(self.top, fg_color='transparent')
+        self.launcher_lang_menu = ctk.CTkOptionMenu(
+            self.body, values=[v for _, v in self.lang_options],
+            width=170, height=28, corner_radius=6,
+            fg_color=COL_TRACK, button_color=COL_TRACK,
+            button_hover_color=COL_ACCENT, dropdown_fg_color=COL_TRACK,
+            dropdown_hover_color=COL_ACCENT, text_color=COL_INK_PRIMARY, font=fonts['sub'],
+            command=lambda label: self._on_launcher_language_changed(
+                lang_code_by_label.get(label, 'de')))
+        self.launcher_lang_menu.set(lang_label_by_code.get(settings.launcher_language, 'Deutsch'))
+        self.launcher_lang_menu.pack(anchor='w', **pad)
+        ctk.CTkLabel(self.body, text=tr('launcher_language_hint'), font=fonts['sub'],
+                     text_color=COL_INK_MUTED, wraplength=400,
+                     justify='left').pack(anchor='w', pady=(4, 0), **pad)
+
+        ctk.CTkLabel(self.body, text=tr('log_path_label'), font=fonts['ui'],
+                     text_color=COL_INK_SECONDARY).pack(anchor='w', pady=(14, 4), **pad)
+        path_row = ctk.CTkFrame(self.body, fg_color='transparent')
         path_row.pack(fill='x', **pad)
         self.path_entry = ctk.CTkEntry(path_row, font=fonts['ui'], fg_color=COL_TRACK,
                                         border_color=COL_BORDER, text_color=COL_INK_PRIMARY)
@@ -2408,35 +2480,25 @@ class SettingsWindow:
                       fg_color=COL_TRACK, hover_color=COL_ACCENT, text_color=COL_INK_PRIMARY,
                       font=fonts['ui'], command=self._browse).pack(side='left', padx=(6, 0))
 
-        ctk.CTkLabel(self.top, text=tr('char_name_label'), font=fonts['ui'],
+        ctk.CTkLabel(self.body, text=tr('char_name_label'), font=fonts['ui'],
                      text_color=COL_INK_SECONDARY).pack(anchor='w', pady=(14, 4), **pad)
-        self.name_entry = ctk.CTkEntry(self.top, font=fonts['ui'], fg_color=COL_TRACK,
+        self.name_entry = ctk.CTkEntry(self.body, font=fonts['ui'], fg_color=COL_TRACK,
                                         border_color=COL_BORDER, text_color=COL_INK_PRIMARY)
         self.name_entry.insert(0, settings.character_name)
         self.name_entry.pack(fill='x', **pad)
 
         self.dual_var = tk.BooleanVar(value=settings.dual_account_mode)
-        ctk.CTkCheckBox(self.top, text=tr('dual_account_label'), font=fonts['ui'],
+        ctk.CTkCheckBox(self.body, text=tr('dual_account_label'), font=fonts['ui'],
                          text_color=COL_INK_SECONDARY, fg_color=COL_ACCENT, hover_color=COL_ACCENT,
                          variable=self.dual_var,
                          command=lambda: self.settings.set_dual_account_mode(self.dual_var.get())
                          ).pack(anchor='w', pady=(16, 4), **pad)
-        ctk.CTkLabel(self.top, text=tr('dual_account_hint'), font=fonts['sub'],
-                     text_color=COL_INK_MUTED, wraplength=420,
-                     justify='left').pack(anchor='w', pady=(0, 0), **pad)
-
-        ctk.CTkLabel(self.top, text=tr('assign_classes_label'), font=fonts['ui'],
-                     text_color=COL_INK_SECONDARY).pack(anchor='w', pady=(14, 4), **pad)
-        ctk.CTkLabel(self.top, text=tr('assign_classes_hint'),
-                     font=fonts['sub'], text_color=COL_INK_MUTED, wraplength=420,
-                     justify='left').pack(anchor='w', pady=(0, 6), **pad)
-        self.class_scroll = ctk.CTkScrollableFrame(self.top, fg_color=COL_TRACK, corner_radius=8)
-        self.class_scroll.pack(fill='both', expand=True, padx=16, pady=(0, 8))
-        self.class_scroll.columnconfigure(0, weight=1)
-        self._populate_classes(known_players)
+        ctk.CTkLabel(self.body, text=tr('dual_account_hint'), font=fonts['sub'],
+                     text_color=COL_INK_MUTED, wraplength=400,
+                     justify='left').pack(anchor='w', pady=(0, 16), **pad)
 
         btn_row = ctk.CTkFrame(self.top, fg_color='transparent')
-        btn_row.pack(fill='x', padx=16, pady=(0, 16))
+        btn_row.pack(fill='x', padx=16, pady=(12, 16), side='bottom')
         ctk.CTkButton(btn_row, text=tr('save_close'), height=34, corner_radius=8,
                       fg_color=COL_ACCENT, hover_color=COL_ACCENT, text_color=COL_INK_PRIMARY,
                       font=fonts['ui'], command=self._save_close).pack(side='right')
@@ -2447,6 +2509,15 @@ class SettingsWindow:
                       fg_color=COL_TRACK, hover_color=COL_TRACK_HOVER, text_color=COL_INK_PRIMARY,
                       font=fonts['ui'], command=on_check_update).pack(side='left')
 
+    def _on_launcher_language_changed(self, lang):
+        if lang == self.settings.launcher_language:
+            return  # re-picking the already-active language - nothing actually changed
+        self.settings.set_launcher_language(lang)
+        # tr() reads settings.launcher_language fresh, and it was just updated above, so this
+        # notice itself renders in the NEWLY selected language, not the one being left behind -
+        # deliberately, so it's legible regardless of which direction the user just switched.
+        RestartNoticeDialog(self.root, self.fonts)
+
     def _browse(self):
         path = filedialog.askopenfilename(
             parent=self.top, title=tr('choose_log_title'),
@@ -2454,33 +2525,6 @@ class SettingsWindow:
         if path:
             self.path_entry.delete(0, 'end')
             self.path_entry.insert(0, path)
-
-    def _populate_classes(self, known_players):
-        if not known_players:
-            ctk.CTkLabel(self.class_scroll, text=tr('no_players_yet'),
-                         font=self.fonts['sub'], text_color=COL_INK_MUTED).grid(
-                row=0, column=0, sticky='w', padx=8, pady=8)
-            return
-        display_name = self.settings.character_name
-        labels = class_labels()
-        by_label = code_by_label()
-        for i, name in enumerate(sorted(known_players)):
-            shown = f'{display_name}{tr("you_suffix")}' if name == 'Du' and display_name else name
-            row = ctk.CTkFrame(self.class_scroll, fg_color='transparent')
-            row.grid(row=i, column=0, sticky='ew', pady=2)
-            row.columnconfigure(0, weight=1)
-            ctk.CTkLabel(row, text=shown, font=self.fonts['ui'],
-                         text_color=COL_INK_PRIMARY).grid(row=0, column=0, sticky='w', padx=(4, 8))
-            values = [labels[code] for code in CLASS_ORDER] + [labels['unknown']]
-            menu = ctk.CTkOptionMenu(row, values=values, width=170, height=28, corner_radius=6,
-                                      fg_color=COL_PAGE, button_color=COL_PAGE,
-                                      button_hover_color=COL_ACCENT, dropdown_fg_color=COL_TRACK,
-                                      dropdown_hover_color=COL_ACCENT, text_color=COL_INK_PRIMARY,
-                                      font=self.fonts['sub'])
-            menu.set(labels.get(self.class_resolver(name), labels['unknown']))
-            menu.configure(command=lambda label, n=name: self.settings.set_class(n, by_label.get(label, 'unknown')))
-            menu.grid(row=0, column=1, sticky='e')
-            self.class_menus[name] = menu
 
     def _save_close(self):
         self.settings.set_log_path(self.path_entry.get().strip())
@@ -2564,7 +2608,6 @@ class MeterApp:
         self.encounter_value = tr('live_label')
         self._last_summary = None
         self._last_encounter_labels = None
-        self.known_players = set()
         self.update_info = None
 
         pil_icons = build_class_icons()
@@ -2810,8 +2853,7 @@ class MeterApp:
             pass
 
     def on_open_settings(self):
-        SettingsWindow(self.root, self.settings, self.fonts, self.known_players,
-                        self._resolve_class, self.on_settings_saved,
+        SettingsWindow(self.root, self.settings, self.fonts, self.on_settings_saved,
                         lambda: self.check_for_update(manual=True))
 
     def on_settings_saved(self):
@@ -2843,11 +2885,7 @@ class MeterApp:
         self.root.after(300, self.on_quit)
 
     def _resolve_class(self, key):
-        manual = self.settings.get_class(key)
-        if manual != 'unknown':
-            return manual
-        guess = self.manager.class_guesser.guess(key)
-        return guess or 'unknown'
+        return self.manager.class_guesser.guess(key) or 'unknown'
 
     def on_copy(self):
         if self._last_summary is None:
@@ -2895,8 +2933,6 @@ class MeterApp:
                                 self.manager.current is not None)
             summary = enc.summarize(use_cache=not is_live_current and enc is not self.manager.session)
             self._last_summary = summary
-            self.known_players.update(summary['overall'].keys())
-            self.known_players.update(summary['heal_totals'].keys())
             self.render_stats(summary)
             self.render_damage(summary)
             self.render_heal(summary)
