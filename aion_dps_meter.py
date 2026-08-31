@@ -18,7 +18,7 @@ from tkinter import filedialog
 import customtkinter as ctk
 from PIL import Image, ImageDraw, ImageTk
 
-APP_VERSION = '1.6.0'
+APP_VERSION = '1.7.0'
 GITHUB_REPO = 'MaaxxsDev/Aion-DPS-Meter'
 GITHUB_API_LATEST = f'https://api.github.com/repos/{GITHUB_REPO}/releases/latest'
 
@@ -65,6 +65,23 @@ def user_data_dir(folder_name='AionDPSMeter'):
     path = os.path.join(base, folder_name)
     os.makedirs(path, exist_ok=True)
     return path
+
+
+def _match_topmost(dialog_top, root):
+    """Mirrors the main window's current -topmost state onto a child dialog Toplevel. Needed
+    because Windows keeps a non-topmost window below EVERY topmost window regardless of normal
+    z-order/.lift() - confirmed directly via EnumWindows: with "Always on top" enabled, a plain
+    CTkToplevel(root) child (e.g. Settings) rendered BEHIND the topmost main window (and even
+    behind the game), not above it, even though .lift()/.focus_force() were both called. Every
+    dialog class in this file (SettingsWindow, ItemInfoPopup, RestartNoticeDialog, UpdateDialog)
+    calls this right after creating self.top, since `root` is always the true main app window for
+    all of them (SettingsWindow/MeterApp both store it as self.root, and every dialog constructed
+    from within SettingsWindow reuses that same self.root, never a nested dialog's own .top)."""
+    try:
+        if root.attributes('-topmost'):
+            dialog_top.attributes('-topmost', True)
+    except Exception:
+        pass
 
 
 ICON_PX = 32
@@ -237,7 +254,7 @@ class Settings:
         self.settings_file = os.path.join(user_data_dir(folder), 'settings.json')
         self.data = {'log_path': DEFAULT_LOG_PATH, 'character_name': '', 'language': 'de',
                      'launcher_language': 'de', 'dual_account_mode': False, 'hide_npcs': False,
-                     'known_fortresses': list(DEFAULT_FORTRESSES)}
+                     'always_on_top': False, 'known_fortresses': list(DEFAULT_FORTRESSES)}
         try:
             with open(self.settings_file, 'r', encoding='utf-8') as f:
                 loaded = json.load(f)
@@ -283,6 +300,10 @@ class Settings:
         return bool(self.data.get('hide_npcs', False))
 
     @property
+    def always_on_top(self):
+        return bool(self.data.get('always_on_top', False))
+
+    @property
     def known_fortresses(self):
         return list(self.data.get('known_fortresses', []))
 
@@ -308,6 +329,10 @@ class Settings:
 
     def set_hide_npcs(self, enabled):
         self.data['hide_npcs'] = bool(enabled)
+        self._save()
+
+    def set_always_on_top(self, enabled):
+        self.data['always_on_top'] = bool(enabled)
         self._save()
 
     def add_fortress(self, name):
@@ -361,6 +386,11 @@ STRINGS = {
                               'erkannten Account zugerechnet. Nur aktivieren, wenn du wirklich '
                               'zwei Accounts gleichzeitig spielst - sonst wird dein eigener Schaden '
                               'unnötig aufgesplittet.',
+        'always_on_top_label': 'Immer im Vordergrund',
+        'always_on_top_hint': 'Hält das Fenster über anderen Fenstern, damit es nicht vom Spiel '
+                               'überdeckt wird. Funktioniert im Fenster- und im '
+                               'Vollbild-Fenstermodus, nicht im echten Vollbildmodus. Wirkt '
+                               'sofort, kein Neustart nötig.',
         'save_close': 'Speichern & Schließen',
         'cancel': 'Abbrechen',
         'check_updates': 'Nach Updates suchen (v{version})',
@@ -439,6 +469,10 @@ STRINGS = {
                               'account was detected most recently. Only enable this if you\'re '
                               'really playing two accounts at once - otherwise it will needlessly '
                               'split up your own damage.',
+        'always_on_top_label': 'Always on top',
+        'always_on_top_hint': 'Keeps the window above other windows so the game can\'t cover it. '
+                               'Works in windowed and borderless/windowed-fullscreen mode, not '
+                               'true exclusive fullscreen. Applies immediately, no restart needed.',
         'save_close': 'Save & Close',
         'cancel': 'Cancel',
         'check_updates': 'Check for updates (v{version})',
@@ -1194,6 +1228,28 @@ DAMAGE_PLAIN_RE_DE = re.compile(
     r'^(?P<attacker>.+?) (?:hat|habt) (?P<target>.+?) '
     r'(?P<amount>[0-9]+(?:\.[0-9]{3})*) (?:kritischen )?Schaden zugef\u00fcgt\.'
 )
+# DoT/periodic-tick damage (STR_SKILL_SUCC_SpellATK_INTERVAL_TO_B, ...SpellATKDrain_INTERVAL_TO_B,
+# ...Bleed_INTERVAL_TO_B, ...Poison_INTERVAL_TO_B - verified in client_strings_msg.xml). Reported
+# by the game as a completely different sentence shape than the initial hit ("...Schaden
+# zugef\u00fcgt" above): "[Target] erh\u00e4lt durch [Skill] X Schaden." / "...Blutungsschaden,
+# nachdem Ihr [Skill] benutzt habt." / "...Giftschaden durch den Einsatz von [Skill]." - none of
+# these three template families carry an explicit attacker placeholder in the client string
+# (unlike the ME_TO_B/A_TO_B interval variants, which spell out "Euren Einsatz"/[%SkillCaster]),
+# the same self-only shape already established for AP/Kinah gain - so this can only be the log
+# owner's own periodic effect ticking on a target. This is the reason DoT damage (e.g. Spiritmaster
+# spirit-fire effects) previously only showed up once on cast and never increased as it ticked.
+DAMAGE_DOT_RE_DE = re.compile(
+    r'^(?P<target>.+?) erh\u00e4lt durch (?P<skill>.+?) '
+    r'(?P<amount>[0-9]+(?:\.[0-9]{3})*) Schaden\.'
+)
+DAMAGE_BLEED_RE_DE = re.compile(
+    r'^(?P<target>.+?) erh\u00e4lt (?P<amount>[0-9]+(?:\.[0-9]{3})*) Blutungsschaden, '
+    r'nachdem Ihr (?P<skill>.+?) benutzt habt\.'
+)
+DAMAGE_POISON_RE_DE = re.compile(
+    r'^(?P<target>.+?) erh\u00e4lt (?P<amount>[0-9]+(?:\.[0-9]{3})*) Giftschaden durch den '
+    r'Einsatz von (?P<skill>.+?)\.'
+)
 HEAL_OTHER_RE_DE = re.compile(
     r'^(?P<target>.+?) (?:hat|habt) (?P<amount>[0-9]+(?:\.[0-9]{3})*) TP wiederhergestellt, '
     r'(?:da|weil) (?P<healer>.+?) (?P<skill>.+?) eingesetzt hat\.'
@@ -1271,6 +1327,24 @@ def parse_line_de(rest, crit):
             'target': normalize_name_de(target), 'amount': parse_amount_de(m.group('amount')),
             'skill': 'Angriff', 'crit': crit,
         }
+    m = DAMAGE_DOT_RE_DE.match(rest)
+    if m:
+        return {
+            'type': 'damage', 'attacker': 'Du', 'target': normalize_name_de(m.group('target')),
+            'amount': parse_amount_de(m.group('amount')), 'skill': m.group('skill'), 'crit': crit,
+        }
+    m = DAMAGE_BLEED_RE_DE.match(rest)
+    if m:
+        return {
+            'type': 'damage', 'attacker': 'Du', 'target': normalize_name_de(m.group('target')),
+            'amount': parse_amount_de(m.group('amount')), 'skill': m.group('skill'), 'crit': crit,
+        }
+    m = DAMAGE_POISON_RE_DE.match(rest)
+    if m:
+        return {
+            'type': 'damage', 'attacker': 'Du', 'target': normalize_name_de(m.group('target')),
+            'amount': parse_amount_de(m.group('amount')), 'skill': m.group('skill'), 'crit': crit,
+        }
     m = HEAL_OTHER_RE_DE.match(rest)
     if m:
         return {
@@ -1335,6 +1409,25 @@ DAMAGE_SKILL_RE_EN = re.compile(
 DAMAGE_PLAIN_RE_EN = re.compile(
     r'^(?P<attacker>.+?) (?:has )?inflicted (?P<amount>[0-9]+(?:,[0-9]{3})*) (?:critical )?damage on '
     r'(?P<target>.+?)\.'
+)
+# DoT/periodic-tick damage - see DAMAGE_DOT_RE_DE for the full explanation (same three client
+# string families: SpellATK_INTERVAL_TO_B / SpellATKDrain_INTERVAL_TO_B / Bleed_INTERVAL_TO_B /
+# Poison_INTERVAL_TO_B, self-only, no explicit attacker placeholder). English bodies: "[Target]
+# received X damage due to the effect of [Skill]." / "...bleeding damage after you used [Skill]."
+# / "...poisoning damage after you used [Skill]." - distinct verb tense ("received", not
+# "receive") and phrasing from the TO_ME variant ("You receive X damage due to [Skill]."), so no
+# overlap with that self-targeted, not-tracked case.
+DAMAGE_DOT_RE_EN = re.compile(
+    r'^(?P<target>.+?) received (?P<amount>[0-9]+(?:,[0-9]{3})*) damage due to the effect of '
+    r'(?P<skill>.+?)\.'
+)
+DAMAGE_BLEED_RE_EN = re.compile(
+    r'^(?P<target>.+?) received (?P<amount>[0-9]+(?:,[0-9]{3})*) bleeding damage after you used '
+    r'(?P<skill>.+?)\.'
+)
+DAMAGE_POISON_RE_EN = re.compile(
+    r'^(?P<target>.+?) received (?P<amount>[0-9]+(?:,[0-9]{3})*) poisoning damage after you used '
+    r'(?P<skill>.+?)\.'
 )
 # Observer view: "X recovered N HP because Y used [Skill]." - the main cross-player heal case.
 HEAL_OTHER_RE_EN = re.compile(
@@ -1408,6 +1501,24 @@ def parse_line_en(rest, crit):
             'type': 'damage', 'attacker': normalize_name_en(m.group('attacker')),
             'target': normalize_name_en(target), 'amount': parse_amount_en(m.group('amount')),
             'skill': 'Attack', 'crit': crit,
+        }
+    m = DAMAGE_DOT_RE_EN.match(rest)
+    if m:
+        return {
+            'type': 'damage', 'attacker': 'Du', 'target': normalize_name_en(m.group('target')),
+            'amount': parse_amount_en(m.group('amount')), 'skill': m.group('skill'), 'crit': crit,
+        }
+    m = DAMAGE_BLEED_RE_EN.match(rest)
+    if m:
+        return {
+            'type': 'damage', 'attacker': 'Du', 'target': normalize_name_en(m.group('target')),
+            'amount': parse_amount_en(m.group('amount')), 'skill': m.group('skill'), 'crit': crit,
+        }
+    m = DAMAGE_POISON_RE_EN.match(rest)
+    if m:
+        return {
+            'type': 'damage', 'attacker': 'Du', 'target': normalize_name_en(m.group('target')),
+            'amount': parse_amount_en(m.group('amount')), 'skill': m.group('skill'), 'crit': crit,
         }
     m = HEAL_OTHER_RE_EN.match(rest)
     if m:
@@ -2292,6 +2403,7 @@ class ItemInfoPopup:
         self.fonts = fonts
         self.color = color
         self.top = ctk.CTkToplevel(root)
+        _match_topmost(self.top, root)
         self.top.title(item_name)
         self.top.geometry('380x580')
         self.top.configure(fg_color=COL_PAGE)
@@ -2386,6 +2498,7 @@ class RestartNoticeDialog:
 
     def __init__(self, root, fonts):
         self.top = ctk.CTkToplevel(root)
+        _match_topmost(self.top, root)
         self.top.title(tr('restart_required_title'))
         self.top.geometry('360x170')
         self.top.configure(fg_color=COL_PAGE)
@@ -2416,6 +2529,7 @@ class SettingsWindow:
         self.on_saved = on_saved
 
         self.top = ctk.CTkToplevel(root)
+        _match_topmost(self.top, root)
         self.top.title(tr('settings_title'))
         self.top.geometry('460x640')
         self.top.configure(fg_color=COL_PAGE)
@@ -2495,6 +2609,16 @@ class SettingsWindow:
                          ).pack(anchor='w', pady=(16, 4), **pad)
         ctk.CTkLabel(self.body, text=tr('dual_account_hint'), font=fonts['sub'],
                      text_color=COL_INK_MUTED, wraplength=400,
+                     justify='left').pack(anchor='w', pady=(0, 0), **pad)
+
+        self.always_on_top_var = tk.BooleanVar(value=settings.always_on_top)
+        ctk.CTkCheckBox(self.body, text=tr('always_on_top_label'), font=fonts['ui'],
+                         text_color=COL_INK_SECONDARY, fg_color=COL_ACCENT, hover_color=COL_ACCENT,
+                         variable=self.always_on_top_var,
+                         command=self._on_always_on_top_changed
+                         ).pack(anchor='w', pady=(16, 4), **pad)
+        ctk.CTkLabel(self.body, text=tr('always_on_top_hint'), font=fonts['sub'],
+                     text_color=COL_INK_MUTED, wraplength=400,
                      justify='left').pack(anchor='w', pady=(0, 16), **pad)
 
         btn_row = ctk.CTkFrame(self.top, fg_color='transparent')
@@ -2517,6 +2641,14 @@ class SettingsWindow:
         # notice itself renders in the NEWLY selected language, not the one being left behind -
         # deliberately, so it's legible regardless of which direction the user just switched.
         RestartNoticeDialog(self.root, self.fonts)
+
+    def _on_always_on_top_changed(self):
+        enabled = self.always_on_top_var.get()
+        self.settings.set_always_on_top(enabled)
+        # Unlike language, a window's topmost attribute has no "already drawn text" problem - it's
+        # a plain Win32 window property, so it can just be applied live to the real app window
+        # right now, no restart needed.
+        self.root.attributes('-topmost', enabled)
 
     def _browse(self):
         path = filedialog.askopenfilename(
@@ -2541,6 +2673,7 @@ class UpdateDialog:
         self.on_launch_installer = on_launch_installer
 
         self.top = ctk.CTkToplevel(root)
+        _match_topmost(self.top, root)
         self.top.title(tr('update_available_title'))
         self.top.geometry('440x380')
         self.top.configure(fg_color=COL_PAGE)
@@ -2878,11 +3011,20 @@ class MeterApp:
             UpdateDialog(self.root, self.fonts, self.update_info, self._launch_installer_and_quit)
 
     def _launch_installer_and_quit(self, installer_path):
+        # Launching the child process (CreateProcess under Popen) doesn't need this app to stay
+        # alive afterward - the installer is fully independent the instant Popen() returns. The
+        # old 300ms delay before quitting only made the race worse: it gave the freshly-launched
+        # installer more of a head start to reach its "is AionDPSMeter.exe still running?" check
+        # (Restart Manager / CloseApplications) while this process was still alive and holding its
+        # own exe file locked, which is exactly the "Setup konnte nicht alle Anwendungen
+        # automatisch schliessen" prompt a user hit in practice. Quitting almost immediately
+        # instead minimizes that window; installer.iss's CloseApplications=force is the remaining
+        # safety net if the race is ever lost anyway (forces the close instead of prompting).
         try:
             subprocess.Popen([installer_path, '/SILENT', '/NORESTART'], close_fds=True)
         except Exception:
             pass
-        self.root.after(300, self.on_quit)
+        self.root.after(10, self.on_quit)
 
     def _resolve_class(self, key):
         return self.manager.class_guesser.guess(key) or 'unknown'
@@ -3057,6 +3199,7 @@ def main():
     ctk.set_appearance_mode('dark')
     ctk.set_default_color_theme('blue')
     root = ctk.CTk()
+    root.attributes('-topmost', settings.always_on_top)
 
     def on_quit():
         stop_event.set()
